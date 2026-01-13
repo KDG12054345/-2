@@ -21,6 +21,11 @@
     <string name="cancel">철회</string>
     <string name="wait_time">대기 시간: %1$d초</string>
     
+    <!-- 페르소나 프롬프트 -->
+    <string name="persona_prompt_rhythmical">Yo fam, secure the bag. Don\'t get caught lackin</string>
+    <string name="persona_prompt_calm">잠깐, 이게 정말 필요한 행동인가요?</string>
+    <string name="persona_prompt_diplomatic">다시 한 번 생각해보세요</string>
+    
     <!-- 서비스 알림 -->
     <string name="notification_channel_app_blocking">앱 차단</string>
     <string name="notification_channel_point_mining">포인트 채굴</string>

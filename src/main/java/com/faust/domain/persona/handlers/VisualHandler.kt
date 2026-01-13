@@ -59,6 +59,9 @@ class VisualHandlerImpl : VisualHandler {
         private const val TAG = "VisualHandler"
     }
     
+    // 현재 등록된 TextWatcher를 추적하여 중복 방지
+    private var currentTextWatcher: TextWatcher? = null
+    
     override fun displayPrompt(
         promptText: String,
         textView: TextView,
@@ -82,23 +85,36 @@ class VisualHandlerImpl : VisualHandler {
     ) {
         try {
             // 기존 TextWatcher 제거 (중복 방지)
-            editText.removeTextChangedListener(null)
+            currentTextWatcher?.let { oldWatcher ->
+                editText.removeTextChangedListener(oldWatcher)
+                Log.d(TAG, "Previous TextWatcher removed")
+            }
             
-            editText.addTextChangedListener(object : TextWatcher {
+            // 새 TextWatcher 생성 및 등록
+            val newWatcher = object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                 
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
                 
                 override fun afterTextChanged(s: Editable?) {
                     val input = s?.toString() ?: ""
-                    val isMatch = validateInput(input, expectedText)
+                    val trimmedInput = input.trim()
+                    val trimmedExpected = expectedText.trim()
+                    val isMatch = validateInput(trimmedInput, trimmedExpected)
+                    
+                    // 디버깅을 위한 상세 로그
+                    Log.d(TAG, "Input validation - Input: '$trimmedInput', Expected: '$trimmedExpected', Match: $isMatch")
+                    
                     proceedButton.isEnabled = isMatch
                     
                     if (isMatch) {
-                        Log.d(TAG, "Input validation passed")
+                        Log.d(TAG, "Input validation passed - proceed button enabled")
                     }
                 }
-            })
+            }
+            
+            editText.addTextChangedListener(newWatcher)
+            currentTextWatcher = newWatcher
             
             Log.d(TAG, "Input validation setup completed")
         } catch (e: Exception) {
@@ -107,6 +123,7 @@ class VisualHandlerImpl : VisualHandler {
     }
     
     override fun validateInput(input: String, expectedText: String): Boolean {
-        return input.trim() == expectedText.trim()
+        // 대소문자 구분 없이 비교
+        return input.equals(expectedText, ignoreCase = true)
     }
 }

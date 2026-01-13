@@ -174,10 +174,10 @@ class PreferenceManager(context: Context) {
     // Persona Type
     fun getPersonaTypeString(): String {
         return try {
-            prefs.getString(KEY_PERSONA_TYPE, "CALM") ?: "CALM"
+            prefs.getString(KEY_PERSONA_TYPE, "RHYTHMICAL") ?: "RHYTHMICAL"
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get persona type", e)
-            "CALM"
+            "RHYTHMICAL"
         }
     }
 

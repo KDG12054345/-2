@@ -10,6 +10,7 @@ import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import android.view.*
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -27,6 +28,7 @@ import com.faust.domain.persona.handlers.HapticHandler
 import com.faust.domain.persona.handlers.HapticHandlerImpl
 import com.faust.domain.persona.handlers.VisualHandler
 import com.faust.domain.persona.handlers.VisualHandlerImpl
+import com.faust.services.AppBlockingService
 import kotlinx.coroutines.*
 
 /**
@@ -54,7 +56,7 @@ class GuiltyNegotiationOverlay(
     // Persona Module
     private val personaEngine: PersonaEngine by lazy {
         val preferenceManager = PreferenceManager(context)
-        val personaProvider = PersonaProvider(preferenceManager)
+        val personaProvider = PersonaProvider(preferenceManager, context)
         val visualHandler: VisualHandler = VisualHandlerImpl()
         val hapticHandler: HapticHandler = HapticHandlerImpl(context)
         val audioHandler: AudioHandler = AudioHandlerImpl(context)
@@ -131,6 +133,17 @@ class GuiltyNegotiationOverlay(
                 val textPrompt = view.findViewById<TextView>(R.id.textPrompt)
                 val editInput = view.findViewById<EditText>(R.id.editInput)
                 val proceedButton = view.findViewById<Button>(R.id.buttonProceed)
+                
+                // 지연 시간을 300ms로 늘려 안정성 확보
+                view.postDelayed({
+                    editInput.requestFocus()
+                    
+                    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                    // [변경] showSoftInput 대신 toggleSoftInput 사용 (강제성 높음)
+                    imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, InputMethodManager.HIDE_IMPLICIT_ONLY)
+                    
+                    Log.d(TAG, "Keyboard toggled via SHOW_FORCED")
+                }, 300)
                 
                 coroutineScope.launch {
                     val profile = personaEngine.getPersonaProfile()
@@ -266,6 +279,10 @@ class GuiltyNegotiationOverlay(
         personaEngine.stopAll()
         
         isUserActionCompleted = true
+        
+        // 현재 context(AppBlockingService)에 허용 패키지 등록 (Grace Period)
+        (context as? AppBlockingService)?.setAllowedPackage(packageName)
+        
         // 강행 실행 - 페널티 적용
         penaltyService.applyLaunchPenalty(packageName, appName)
         dismiss(force = true)
@@ -328,20 +345,19 @@ class GuiltyNegotiationOverlay(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             type,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR or
-                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
-                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED,
+            // [핵심] 플래그를 최소화하여 충돌 방지
+            // FLAG_NOT_FOCUSABLE 절대 금지
+            WindowManager.LayoutParams.FLAG_DIM_BEHIND or
+                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or // 바깥 터치 감지 (선택 사항)
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or     // 잠금 화면 위 표시
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,  // 하드웨어 가속 활성화
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.CENTER
-            // 최상단에 고정되도록 설정
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            }
+            dimAmount = 0.5f
+            // ALWAYS_VISIBLE로 윈도우 생성 시점부터 키보드 공간 확보 시도
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE or
+                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         }
     }
     

@@ -38,6 +38,9 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     // 차단된 앱 목록을 메모리에 캐싱 (스레드 안전)
     private val blockedAppsCache = ConcurrentHashMap.newKeySet<String>()
     
+    // 페널티를 지불한 앱을 기억하는 변수 (Grace Period)
+    private var lastAllowedPackage: String? = null
+    
     // LifecycleOwner 구현
     private val lifecycleRegistry: LifecycleRegistry = LifecycleRegistry(this)
     
@@ -149,6 +152,14 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     }
 
     /**
+     * 허용된 패키지를 설정합니다.
+     * 페널티를 지불한 앱은 오버레이가 다시 뜨지 않도록 합니다.
+     */
+    fun setAllowedPackage(packageName: String?) {
+        lastAllowedPackage = packageName
+    }
+
+    /**
      * [핵심 이벤트: 차단 관련 이벤트 - handleAppLaunch]
      * 
      * 역할: 감지된 패키지 이름이 데이터베이스의 blocked_apps 테이블(메모리 캐시)에 존재하는지 대조하는 이벤트입니다.
@@ -158,6 +169,11 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
      * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
      */
     private fun handleAppLaunch(packageName: String) {
+        // 페널티를 지불한 앱이면 오버레이를 띄우지 않음 (Grace Period)
+        if (packageName == lastAllowedPackage) {
+            return
+        }
+        
         // 메모리 캐시에서 차단 여부 확인
         val isBlocked = blockedAppsCache.contains(packageName)
         
@@ -176,6 +192,8 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                 }
             }
         } else {
+            // 차단되지 않은 앱으로 이동하면 lastAllowedPackage 초기화하여 다시 차단 가능하게 함
+            lastAllowedPackage = null
             // 차단되지 않은 앱이면 오버레이 숨김
             hideOverlay()
         }

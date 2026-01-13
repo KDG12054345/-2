@@ -340,6 +340,11 @@ sequenceDiagram
   - Persona Module 통합: 능동적 계약 방식 (사용자 입력 검증)
   - 페르소나별 피드백 (시각, 촉각, 청각)
   - Safety Net: 기기 상태에 따른 피드백 모드 자동 조정
+- **성능 최적화**:
+  - 하드웨어 가속 활성화: `WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED` 플래그 사용
+  - `PixelFormat.TRANSLUCENT`로 알파 채널 렌더링 시 가속 지원
+  - `dimAmount = 0.5f`로 배경 어둡게 처리 (하드웨어 가속 시 부드러운 렌더링)
+  - 앱 전체 하드웨어 가속: `AndroidManifest.xml`의 `<application>` 태그에 `android:hardwareAccelerated="true"` 설정
 
 ### 2. Service Layer
 
@@ -777,6 +782,19 @@ MainActivity
   - 포인트 및 차단 앱 목록 변경 시에만 UI 업데이트
   - 데이터베이스 직접 접근 제거로 경량화
 - **효과**: 배터리 효율 향상, 불필요한 UI 갱신 제거, 코드 분리로 유지보수성 향상
+
+#### GuiltyNegotiationOverlay 하드웨어 가속 최적화
+- **목적**: 오버레이 렌더링 성능 향상 및 리플 애니메이션 부드러운 동작 보장
+- **구현**:
+  - `WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED` 플래그 추가
+  - `PixelFormat.TRANSLUCENT` 유지 (알파 채널 렌더링 시 가속 지원)
+  - `dimAmount = 0.5f` 설정 (하드웨어 가속 시 부드러운 배경 어둡게 처리)
+  - `AndroidManifest.xml`의 `<application>` 태그에 `android:hardwareAccelerated="true"` 명시
+- **효과**: 
+  - "non-hardware accelerated Canvas" 경고 제거
+  - 버튼 클릭 시 리플 애니메이션 부드럽게 동작
+  - 오버레이 UI 반응 속도 향상
+  - GPU 가속을 통한 렌더링 성능 개선
 
 ### 개선 가능 영역
 - 데이터베이스 인덱싱
