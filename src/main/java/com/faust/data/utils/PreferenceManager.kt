@@ -1,0 +1,200 @@
+package com.faust.data.utils
+
+import android.content.Context
+import android.util.Log
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+import com.faust.models.UserTier
+import java.io.IOException
+import java.security.GeneralSecurityException
+
+/**
+ * 암호화된 SharedPreferences를 사용하는 PreferenceManager입니다.
+ * 포인트 조작을 방지하기 위해 EncryptedSharedPreferences를 사용합니다.
+ */
+class PreferenceManager(context: Context) {
+    private val prefs = try {
+        createEncryptedSharedPreferences(context)
+    } catch (e: Exception) {
+        Log.e(TAG, "Failed to create EncryptedSharedPreferences, falling back to regular SharedPreferences", e)
+        // 폴백: 일반 SharedPreferences 사용 (보안 경고)
+        context.getSharedPreferences(
+            PREF_NAME,
+            Context.MODE_PRIVATE
+        )
+    }
+
+    companion object {
+        private const val TAG = "PreferenceManager"
+        private const val PREF_NAME = "faust_prefs"
+        private const val KEY_USER_TIER = "user_tier"
+        private const val KEY_CURRENT_POINTS = "current_points"
+        private const val KEY_LAST_MINING_TIME = "last_mining_time"
+        private const val KEY_LAST_MINING_APP = "last_mining_app"
+        private const val KEY_LAST_RESET_TIME = "last_reset_time"
+        private const val KEY_IS_SERVICE_RUNNING = "is_service_running"
+        private const val KEY_PERSONA_TYPE = "persona_type"
+
+        /**
+         * EncryptedSharedPreferences 인스턴스를 생성합니다.
+         */
+        private fun createEncryptedSharedPreferences(context: Context): android.content.SharedPreferences {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+
+            return EncryptedSharedPreferences.create(
+                context,
+                PREF_NAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        }
+    }
+
+    // User Tier
+    fun getUserTier(): UserTier {
+        val tierName = prefs.getString(KEY_USER_TIER, UserTier.FREE.name) ?: UserTier.FREE.name
+        return try {
+            UserTier.valueOf(tierName)
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "Invalid user tier: $tierName, defaulting to FREE", e)
+            UserTier.FREE
+        }
+    }
+
+    fun setUserTier(tier: UserTier) {
+        try {
+            prefs.edit().putString(KEY_USER_TIER, tier.name).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set user tier", e)
+        }
+    }
+
+    // Current Points
+    fun getCurrentPoints(): Int {
+        return try {
+            prefs.getInt(KEY_CURRENT_POINTS, 0)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get current points", e)
+            0
+        }
+    }
+
+    fun setCurrentPoints(points: Int) {
+        try {
+            prefs.edit().putInt(KEY_CURRENT_POINTS, points.coerceAtLeast(0)).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set current points", e)
+        }
+    }
+
+    fun addPoints(points: Int) {
+        val current = getCurrentPoints()
+        setCurrentPoints(current + points)
+    }
+
+    fun subtractPoints(points: Int) {
+        val current = getCurrentPoints()
+        setCurrentPoints((current - points).coerceAtLeast(0))
+    }
+
+    // Mining Time Tracking
+    fun getLastMiningTime(): Long {
+        return try {
+            prefs.getLong(KEY_LAST_MINING_TIME, 0)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get last mining time", e)
+            0L
+        }
+    }
+
+    fun setLastMiningTime(time: Long) {
+        try {
+            prefs.edit().putLong(KEY_LAST_MINING_TIME, time).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set last mining time", e)
+        }
+    }
+
+    fun getLastMiningApp(): String? {
+        return try {
+            prefs.getString(KEY_LAST_MINING_APP, null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get last mining app", e)
+            null
+        }
+    }
+
+    fun setLastMiningApp(packageName: String?) {
+        try {
+            prefs.edit().putString(KEY_LAST_MINING_APP, packageName).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set last mining app", e)
+        }
+    }
+
+    // Weekly Reset
+    fun getLastResetTime(): Long {
+        return try {
+            prefs.getLong(KEY_LAST_RESET_TIME, 0)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get last reset time", e)
+            0L
+        }
+    }
+
+    fun setLastResetTime(time: Long) {
+        try {
+            prefs.edit().putLong(KEY_LAST_RESET_TIME, time).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set last reset time", e)
+        }
+    }
+
+    // Service State
+    fun isServiceRunning(): Boolean {
+        return try {
+            prefs.getBoolean(KEY_IS_SERVICE_RUNNING, false)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get service running state", e)
+            false
+        }
+    }
+
+    fun setServiceRunning(running: Boolean) {
+        try {
+            prefs.edit().putBoolean(KEY_IS_SERVICE_RUNNING, running).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set service running state", e)
+        }
+    }
+
+    // Persona Type
+    fun getPersonaTypeString(): String {
+        return try {
+            prefs.getString(KEY_PERSONA_TYPE, "CALM") ?: "CALM"
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get persona type", e)
+            "CALM"
+        }
+    }
+
+    fun setPersonaType(type: String) {
+        try {
+            prefs.edit().putString(KEY_PERSONA_TYPE, type).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set persona type", e)
+        }
+    }
+
+    // Clear all preferences (for testing/reset)
+    fun clearAll() {
+        try {
+            prefs.edit().clear().apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to clear preferences", e)
+        }
+    }
+}

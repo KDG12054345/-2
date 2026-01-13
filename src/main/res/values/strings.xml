@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Faust</string>
+    
+    <!-- 권한 관련 -->
+    <string name="permission_usage_stats_title">사용 통계 권한 필요</string>
+    <string name="permission_usage_stats_message">앱 사용을 추적하려면 사용 통계 권한이 필요합니다.</string>
+    <string name="permission_overlay_title">다른 앱 위에 표시 권한 필요</string>
+    <string name="permission_overlay_message">차단 기능을 사용하려면 다른 앱 위에 표시 권한이 필요합니다.</string>
+    
+    <!-- 메인 화면 -->
+    <string name="current_points">현재 포인트: %1$d WP</string>
+    <string name="blocked_apps">차단된 앱</string>
+    <string name="add_app">앱 추가</string>
+    <string name="no_blocked_apps">차단된 앱이 없습니다</string>
+    
+    <!-- 유죄 협상 화면 -->
+    <string name="guilty_negotiation_title">앱 실행 확인</string>
+    <string name="guilty_negotiation_message">이 앱을 실행하면 3 WP가 차감됩니다.</string>
+    <string name="proceed">강행</string>
+    <string name="cancel">철회</string>
+    <string name="wait_time">대기 시간: %1$d초</string>
+    
+    <!-- 서비스 알림 -->
+    <string name="notification_channel_app_blocking">앱 차단</string>
+    <string name="notification_channel_point_mining">포인트 채굴</string>
+    <string name="notification_app_blocking_title">앱 차단 활성화</string>
+    <string name="notification_point_mining_title">포인트 채굴 중</string>
+    
+    <!-- 접근성 서비스 -->
+    <string name="accessibility_service_description">앱 실행을 감지하여 차단된 앱을 모니터링합니다.</string>
+</resources>
