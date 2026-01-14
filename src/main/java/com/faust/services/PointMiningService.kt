@@ -43,9 +43,15 @@ class PointMiningService : LifecycleService() {
         private const val TAG = "PointMiningService"
         private const val NOTIFICATION_ID = 1002
         private const val CHANNEL_ID = "point_mining_channel"
-        private const val MINING_INTERVAL_MS = 60_000L // 1분마다 체크
-        private const val POINTS_PER_10_MINUTES = 1 // 10분당 1 WP
-        private const val FREE_TIER_EFFICIENCY = 0.5 // Free 티어는 0.5x 효율
+        
+        // 테스트용: 10초마다 체크 (기존 60초)
+        private const val MINING_INTERVAL_MS = 10_000L 
+        
+        // 테스트용: 1분당 1 WP 적립 (기존 10분)
+        private const val POINTS_PER_MINUTE = 1 
+        
+        // Free 티어 효율: 1.0으로 설정 (정수 절삭 방지)
+        private const val FREE_TIER_EFFICIENCY = 1.0
 
         fun startService(context: Context) {
             val intent = Intent(context, PointMiningService::class.java)
@@ -78,6 +84,12 @@ class PointMiningService : LifecycleService() {
      */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        
+        // 서비스가 시작될 때 마지막 채굴 시간을 '현재'로 초기화하여 
+        // 과거의 '남은 시간' 때문에 즉시 포인트가 오르는 것을 방지합니다.
+        preferenceManager.setLastMiningTime(System.currentTimeMillis())
+        Log.d(TAG, "Mining Service started - Timer reset to current time")
+        
         startMining()
         return START_STICKY
     }
@@ -119,6 +131,8 @@ class PointMiningService : LifecycleService() {
      */
     private suspend fun processMining() {
         val currentApp = getCurrentForegroundApp()
+        Log.d(TAG, "Current Foreground App: $currentApp") // 어떤 앱을 인식 중인지 확인
+
         if (currentApp == null) {
             // 포그라운드 앱이 없으면 채굴 중지
             return
@@ -127,7 +141,7 @@ class PointMiningService : LifecycleService() {
         // 차단된 앱인지 확인
         val isBlocked = database.appBlockDao().getBlockedApp(currentApp) != null
         if (isBlocked) {
-            // 차단된 앱 사용 중이면 채굴 중지
+            Log.d(TAG, "Mining paused: $currentApp is a blocked app")
             preferenceManager.setLastMiningApp(null)
             return
         }
@@ -145,27 +159,47 @@ class PointMiningService : LifecycleService() {
 
         // 같은 앱 사용 중 - 채굴 시간 계산
         val elapsedMinutes = (currentTime - lastMiningTime) / (1000 * 60)
-        
-        // 10분 단위로 포인트 계산 (Free 티어는 0.5x 효율)
+        Log.d(TAG, "Mining Progress - Elapsed Minutes: $elapsedMinutes")
+
         val pointsToAdd = calculatePoints(elapsedMinutes)
         
         if (pointsToAdd > 0) {
             addMiningPoints(pointsToAdd)
-            preferenceManager.setLastMiningTime(currentTime)
+            
+            // 현재 시간에서 1분을 빼는 대신, 기존 기록(lastMiningTime)에 1분을 더합니다.
+            // 이렇게 하면 '소진된 1분'을 제외한 나머지 '초' 단위 기록이 보존되어 정밀도가 향상됩니다.
+            val lastTime = preferenceManager.getLastMiningTime()
+            preferenceManager.setLastMiningTime(lastTime + (1000 * 60))
+            
+            Log.d(TAG, "Points Added: $pointsToAdd WP, New LastMiningTime set")
         }
     }
 
     private fun calculatePoints(elapsedMinutes: Long): Int {
-        val userTier = preferenceManager.getUserTier()
-        val efficiency = when (userTier) {
-            UserTier.FREE -> FREE_TIER_EFFICIENCY
-            UserTier.STANDARD -> 1.0
-            UserTier.FAUST_PRO -> 1.0 // MVP에서는 1.0으로 고정
+        // 1분이 경과하지 않았으면 0 반환
+        if (elapsedMinutes < 1) {
+            return 0
         }
-
-        // 10분당 1 WP 기준으로 계산
-        val basePoints = (elapsedMinutes / 10).toInt()
-        return (basePoints * efficiency).toInt()
+        
+        // 티어별 효율 적용
+        val userTier = preferenceManager.getUserTier()
+        // 테스트를 위해 효율을 1.0으로 강제하거나, 최소 1포인트를 보장합니다.
+        val efficiency = when (userTier) {
+            UserTier.FREE -> FREE_TIER_EFFICIENCY // 1.0 (정수 절삭 방지)
+            UserTier.STANDARD -> 1.0
+            UserTier.FAUST_PRO -> 1.0
+        }
+        
+        // 1분마다 1포인트씩만 적립 (여러 분 경과해도 한 번에 1포인트만)
+        val points = (1 * efficiency).toInt()
+        // 정수 절삭으로 인한 0 포인트 방지: 최소 1포인트 보장
+        val finalPoints = if (points < 1) 1 else points
+        
+        if (finalPoints > 0) {
+            Log.d(TAG, "Mining Success: $elapsedMinutes min elapsed. Tier: $userTier, Efficiency: $efficiency, Points: $finalPoints (1 min unit)")
+        }
+        
+        return finalPoints
     }
 
     /**
@@ -211,11 +245,18 @@ class PointMiningService : LifecycleService() {
             )
             
             if (stats.isNullOrEmpty()) {
+                Log.w(TAG, "Usage stats is empty - permission may not be granted")
                 null
             } else {
-                stats.maxByOrNull { it.lastTimeUsed }?.packageName
+                val packageName = stats.maxByOrNull { it.lastTimeUsed }?.packageName
+                Log.d(TAG, "Detected foreground app: $packageName")
+                packageName
             }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException: Usage stats permission not granted", e)
+            null
         } catch (e: Exception) {
+            Log.e(TAG, "Error getting current foreground app", e)
             null
         }
     }

@@ -123,9 +123,9 @@ class VisualHandlerImpl : VisualHandler {
     }
     
     override fun validateInput(input: String, expectedText: String): Boolean {
-        // 모든 공백 제거 후 대소문자 구분 없이 비교
-        val normalizedInput = input.replace("\\s".toRegex(), "")
-        val normalizedExpected = expectedText.replace("\\s".toRegex(), "")
+        // 모든 공백 및 문장부호 제거 후 대소문자 구분 없이 비교
+        val normalizedInput = input.replace("[\\s\\p{Punct}]".toRegex(), "")
+        val normalizedExpected = expectedText.replace("[\\s\\p{Punct}]".toRegex(), "")
         return normalizedInput.equals(normalizedExpected, ignoreCase = true)
     }
 }

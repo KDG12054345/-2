@@ -300,9 +300,9 @@ class GuiltyNegotiationOverlay(
     /**
      * [핵심 이벤트: 포인트 및 페널티 이벤트 - onProceed]
      * 
-     * 역할: 사용자가 오버레이에서 '강행'을 선택할 때 발생하며, PenaltyService를 통해 3 WP를 차감하고 오버레이를 닫습니다.
+     * 역할: 사용자가 오버레이에서 '강행'을 선택할 때 발생하며, PenaltyService를 통해 6 WP를 차감하고 오버레이를 닫습니다.
      * 트리거: 사용자가 오버레이의 '강행' 버튼 클릭
-     * 처리: PenaltyService.applyLaunchPenalty() 호출 (Free 티어: 3 WP 차감), 오버레이 닫기
+     * 처리: PenaltyService.applyLaunchPenalty() 호출 (모든 티어: 6 WP 차감, 즉시 완료 대기), 오버레이 닫기
      * 
      * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
      */
@@ -317,17 +317,20 @@ class GuiltyNegotiationOverlay(
         // 현재 context(AppBlockingService)에 허용 패키지 등록 (Grace Period)
         (context as? AppBlockingService)?.setAllowedPackage(packageName)
         
-        // 강행 실행 - 페널티 적용
-        penaltyService.applyLaunchPenalty(packageName, appName)
-        dismiss(force = true)
+        // 강행 실행 - 페널티 적용 (즉시 완료 대기)
+        coroutineScope.launch {
+            penaltyService.applyLaunchPenalty(packageName, appName)
+            // 트랜잭션 완료 후 오버레이 닫기
+            dismiss(force = true)
+        }
     }
 
     /**
      * [핵심 이벤트: 포인트 및 페널티 이벤트 - onCancel]
      * 
-     * 역할: 사용자가 '철회'를 선택할 때 발생하며, 오버레이를 닫고 해당 앱 사용을 중단하도록 유도합니다 (Free 티어는 페널티 0).
+     * 역할: 사용자가 '철회'를 선택할 때 발생하며, 오버레이를 닫고 해당 앱 사용을 중단하도록 유도합니다.
      * 트리거: 사용자가 오버레이의 '철회' 버튼 클릭
-     * 처리: PenaltyService.applyQuitPenalty() 호출 (Free 티어: 페널티 0), 홈 화면으로 이동, 오버레이 닫기
+     * 처리: PenaltyService.applyQuitPenalty() 호출 (Free 티어: 3 WP 차감, Standard 티어: 3 WP 차감, 즉시 완료 대기), 홈 화면으로 이동, 오버레이 닫기
      * 
      * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
      */
@@ -338,33 +341,33 @@ class GuiltyNegotiationOverlay(
         personaEngine.stopAll()
         
         isUserActionCompleted = true
-        // 철회 - Free 티어는 페널티 없음
-        penaltyService.applyQuitPenalty(packageName, appName)
         
-        // 홈 화면으로 이동
-        val intent = Intent(Intent.ACTION_MAIN).apply {
-            addCategory(Intent.CATEGORY_HOME)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        context.startActivity(intent)
-        Log.d(TAG, "Launched home screen intent")
-        
-        // 오버레이 제거
-        overlayView?.let { view ->
-            try {
-                windowManager?.removeView(view)
-                Log.d(TAG, "Overlay view removed after cancel")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to remove overlay view after cancel", e)
+        // 철회 - 페널티 적용 (즉시 완료 대기)
+        coroutineScope.launch {
+            penaltyService.applyQuitPenalty(packageName, appName)
+            
+            // 트랜잭션 완료 후 홈 화면으로 이동
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
+            context.startActivity(intent)
+            Log.d(TAG, "Launched home screen intent")
+            
+            // 오버레이 제거 및 리소스 정리
+            countdownJob?.cancel()
+            overlayView?.let { view ->
+                try {
+                    windowManager?.removeView(view)
+                    Log.d(TAG, "Overlay view removed after cancel")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to remove overlay view after cancel", e)
+                }
+            }
+            overlayView = null
+            windowManager = null
+            lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
         }
-        
-        // 리소스 정리
-        countdownJob?.cancel()
-        coroutineScope.cancel()
-        overlayView = null
-        windowManager = null
-        lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
     }
 
     private fun createWindowParams(): WindowManager.LayoutParams {

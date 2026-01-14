@@ -8,16 +8,15 @@ import com.faust.data.database.FaustDatabase
 import com.faust.data.utils.PreferenceManager
 import com.faust.models.TransactionType
 import com.faust.models.UserTier
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * [핵심 이벤트: 포인트 및 페널티 이벤트 처리]
  * 
  * 역할: 강행 실행 및 철회 시 페널티를 계산하고 적용하는 서비스입니다.
  * 트리거: GuiltyNegotiationOverlay.onProceed() 또는 onCancel() 호출
- * 처리: 사용자 티어에 따라 페널티 계산, DB 트랜잭션으로 포인트 차감 및 거래 내역 저장
+ * 처리: 사용자 티어에 따라 페널티 계산, DB 트랜잭션으로 포인트 차감 및 거래 내역 저장 (즉시 완료 대기)
  * 
  * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
  */
@@ -28,28 +27,28 @@ class PenaltyService(private val context: Context) {
     private val preferenceManager: PreferenceManager by lazy {
         PreferenceManager(context)
     }
-    private val scope = CoroutineScope(Dispatchers.IO)
 
     companion object {
         private const val TAG = "PenaltyService"
-        private const val FREE_TIER_LAUNCH_PENALTY = 3
-        private const val FREE_TIER_QUIT_PENALTY = 0 // Free 티어는 철회 시 차감 없음
+        private const val LAUNCH_PENALTY = 6 // 모든 티어: 강행 실행 시 6 WP 차감
+        private const val FREE_TIER_QUIT_PENALTY = 3 // Free 티어: 철회 시 3 WP 차감
+        private const val STANDARD_TIER_QUIT_PENALTY = 3 // Standard 티어: 철회 시 3 WP 차감
     }
 
     /**
      * [핵심 이벤트: 포인트 및 페널티 이벤트 - onProceed 처리]
      * 
-     * 역할: 앱 강행 실행 시 페널티를 적용합니다. Free 티어는 3 WP를 차감합니다.
+     * 역할: 앱 강행 실행 시 페널티를 적용합니다. 모든 티어는 6 WP를 차감합니다.
      * 트리거: GuiltyNegotiationOverlay.onProceed() 호출
-     * 처리: 사용자 티어에 따라 페널티 계산, applyPenalty() 호출
+     * 처리: 사용자 티어에 따라 페널티 계산, applyPenalty() 호출 (즉시 완료 대기)
      */
-    fun applyLaunchPenalty(packageName: String, appName: String) {
-        scope.launch {
+    suspend fun applyLaunchPenalty(packageName: String, appName: String) {
+        withContext(Dispatchers.IO) {
             val userTier = preferenceManager.getUserTier()
             val penalty = when (userTier) {
-                UserTier.FREE -> FREE_TIER_LAUNCH_PENALTY
-                UserTier.STANDARD -> FREE_TIER_LAUNCH_PENALTY // MVP에서는 동일
-                UserTier.FAUST_PRO -> FREE_TIER_LAUNCH_PENALTY // MVP에서는 동일
+                UserTier.FREE -> LAUNCH_PENALTY
+                UserTier.STANDARD -> LAUNCH_PENALTY
+                UserTier.FAUST_PRO -> LAUNCH_PENALTY // 추후 변경 예정
             }
 
             applyPenalty(penalty, "앱 강행 실행: $appName")
@@ -59,17 +58,17 @@ class PenaltyService(private val context: Context) {
     /**
      * [핵심 이벤트: 포인트 및 페널티 이벤트 - onCancel 처리]
      * 
-     * 역할: 앱 철회 시 페널티를 적용합니다. Free 티어는 페널티 0입니다.
+     * 역할: 앱 철회 시 페널티를 적용합니다. Free 티어는 3 WP, Standard 티어는 3 WP를 차감합니다.
      * 트리거: GuiltyNegotiationOverlay.onCancel() 호출
-     * 처리: 사용자 티어에 따라 페널티 계산 (Free 티어는 0), applyPenalty() 호출 (페널티 > 0인 경우만)
+     * 처리: 사용자 티어에 따라 페널티 계산, applyPenalty() 호출 (페널티 > 0인 경우만, 즉시 완료 대기)
      */
-    fun applyQuitPenalty(packageName: String, appName: String) {
-        scope.launch {
+    suspend fun applyQuitPenalty(packageName: String, appName: String) {
+        withContext(Dispatchers.IO) {
             val userTier = preferenceManager.getUserTier()
             val penalty = when (userTier) {
                 UserTier.FREE -> FREE_TIER_QUIT_PENALTY
-                UserTier.STANDARD -> 2 // MVP 이후 구현
-                UserTier.FAUST_PRO -> 0 // MVP 이후 구현 (실제로는 50% 삭감)
+                UserTier.STANDARD -> STANDARD_TIER_QUIT_PENALTY
+                UserTier.FAUST_PRO -> 0 // 추후 변경 예정
             }
 
             if (penalty > 0) {

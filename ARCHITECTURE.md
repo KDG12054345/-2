@@ -1137,7 +1137,7 @@ WeeklyResetReceiver.onReceive()
 
 **처리 로직**:
 - `PenaltyService.applyLaunchPenalty()` 호출
-- Free 티어: 3 WP 차감
+- 모든 티어: 6 WP 차감
 - 오버레이 닫기
 
 **관련 컴포넌트**:
@@ -1153,7 +1153,9 @@ WeeklyResetReceiver.onReceive()
 
 **처리 로직**:
 - `PenaltyService.applyQuitPenalty()` 호출
-- Free 티어: 페널티 0 (차감 없음)
+- Free 티어: 3 WP 차감 후 홈 복귀
+- Standard 티어: 3 WP 차감 후 홈 복귀
+- FAUST_PRO: 추후 변경 예정
 - 오버레이 닫기
 
 **관련 컴포넌트**:

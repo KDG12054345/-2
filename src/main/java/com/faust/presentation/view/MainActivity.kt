@@ -2,6 +2,7 @@ package com.faust.presentation.view
 
 import android.Manifest
 import android.app.AlertDialog
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -77,6 +78,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val usageStatsPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (checkUsageStatsPermission()) {
+            startServices()
+        } else {
+            Toast.makeText(this, "사용 정보 접근 권한이 필요합니다", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     /**
      * [시스템 진입점: 사용자 진입점]
      * 
@@ -92,8 +103,8 @@ class MainActivity : AppCompatActivity() {
         setupViews()
         setupRecyclerView()
         
-        // 앱 시작 시 오버레이 권한 확인
-        checkOverlayPermissionOnStart()
+        // 앱 시작 시 권한 확인
+        checkPermissionsOnStart()
         
         checkPermissions()
         observeViewModel()
@@ -238,7 +249,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkAllPermissions(): Boolean {
-        return checkAccessibilityService() && checkOverlayPermission()
+        return checkAccessibilityService() && checkOverlayPermission() && checkUsageStatsPermission()
     }
 
     private fun checkAccessibilityService(): Boolean {
@@ -256,17 +267,55 @@ class MainActivity : AppCompatActivity() {
             true
         }
     }
+
+    /**
+     * 사용 정보 접근 권한(PACKAGE_USAGE_STATS)이 있는지 확인합니다.
+     * @return 권한이 있으면 true, 없으면 false
+     */
+    private fun checkUsageStatsPermission(): Boolean {
+        return try {
+            val appOpsManager = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOpsManager.unsafeCheckOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    android.os.Process.myUid(),
+                    packageName
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                appOpsManager.checkOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    android.os.Process.myUid(),
+                    packageName
+                )
+            }
+            mode == AppOpsManager.MODE_ALLOWED
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking usage stats permission", e)
+            false
+        }
+    }
     
     /**
-     * 앱 시작 시 오버레이 권한을 확인하고, 없으면 설정 화면으로 유도합니다.
+     * 앱 시작 시 필수 권한을 확인하고, 없으면 설정 화면으로 유도합니다.
      */
-    private fun checkOverlayPermissionOnStart() {
+    private fun checkPermissionsOnStart() {
+        val missingPermissions = mutableListOf<String>()
+        
         if (!checkOverlayPermission()) {
+            missingPermissions.add("다른 앱 위에 표시 권한")
+        }
+        if (!checkUsageStatsPermission()) {
+            missingPermissions.add("사용 정보 접근 권한")
+        }
+        
+        if (missingPermissions.isNotEmpty()) {
             AlertDialog.Builder(this)
                 .setTitle("권한 필요")
-                .setMessage("앱 차단 기능을 위해 다른 앱 위에 표시 권한이 필요합니다")
+                .setMessage("앱 기능을 위해 다음 권한이 필요합니다:\n\n" +
+                        missingPermissions.joinToString("\n") { "• $it" })
                 .setPositiveButton("설정으로 이동") { _, _ ->
-                    requestOverlayPermission()
+                    requestPermissions()
                 }
                 .setNegativeButton("나중에", null)
                 .setCancelable(false)
@@ -290,7 +339,8 @@ class MainActivity : AppCompatActivity() {
             .setTitle("권한 필요")
             .setMessage("앱 차단 기능을 사용하려면 다음 권한이 필요합니다:\n\n" +
                     "1. 접근성 서비스 권한\n" +
-                    "2. 다른 앱 위에 표시 권한")
+                    "2. 다른 앱 위에 표시 권한\n" +
+                    "3. 사용 정보 접근 권한")
             .setPositiveButton("설정") { _, _ ->
                 requestPermissions()
             }
@@ -308,7 +358,17 @@ class MainActivity : AppCompatActivity() {
                 Uri.parse("package:$packageName")
             )
             overlayPermissionLauncher.launch(intent)
+        } else if (!checkUsageStatsPermission()) {
+            requestUsageStatsPermission()
         }
+    }
+
+    /**
+     * 사용 정보 접근 권한 설정 화면으로 이동합니다.
+     */
+    private fun requestUsageStatsPermission() {
+        val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+        usageStatsPermissionLauncher.launch(intent)
     }
 
     private fun startServices() {
@@ -324,11 +384,11 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         
-        // 오버레이 권한 재확인 및 버튼 활성화 상태 업데이트
+        // 권한 재확인 및 버튼 활성화 상태 업데이트
         updateServiceButtonState()
         
-        // 접근성 서비스 권한이 활성화되었는지 확인
-        if (checkAccessibilityService() && checkOverlayPermission()) {
+        // 모든 권한이 활성화되었는지 확인
+        if (checkAccessibilityService() && checkOverlayPermission() && checkUsageStatsPermission()) {
             // 모든 권한이 활성화되었으면 서비스 시작
             PointMiningService.startService(this)
         }
