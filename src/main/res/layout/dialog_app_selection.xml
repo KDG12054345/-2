@@ -44,6 +44,13 @@
             style="@style/Widget.MaterialComponents.Chip.Choice" />
 
         <com.google.android.material.chip.Chip
+            android:id="@+id/chipBrowser"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🌐 브라우저"
+            style="@style/Widget.MaterialComponents.Chip.Choice" />
+
+        <com.google.android.material.chip.Chip
             android:id="@+id/chipOther"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"

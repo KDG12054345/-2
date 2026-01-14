@@ -70,6 +70,7 @@ class AppSelectionDialog(
                 R.id.chipSocial -> AppCategoryUtils.CATEGORY_SOCIAL
                 R.id.chipGame -> AppCategoryUtils.CATEGORY_GAME
                 R.id.chipVideo -> AppCategoryUtils.CATEGORY_VIDEO
+                R.id.chipBrowser -> AppCategoryUtils.CATEGORY_BROWSER
                 R.id.chipOther -> AppCategoryUtils.CATEGORY_OTHER
                 else -> AppCategoryUtils.CATEGORY_ALL
             }

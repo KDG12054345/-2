@@ -72,7 +72,10 @@ class PenaltyService(private val context: Context) {
             }
 
             if (penalty > 0) {
+                Log.w(TAG, "철회 버튼 클릭: ${penalty} WP 차감 예정 (티어: ${userTier.name})")
                 applyPenalty(penalty, "앱 철회: $appName")
+            } else {
+                Log.d(TAG, "철회 버튼 클릭: 포인트 차감 없음 (티어: ${userTier.name})")
             }
         }
     }
@@ -105,7 +108,12 @@ class PenaltyService(private val context: Context) {
                         )
                         
                         // PreferenceManager 동기화 (호환성 유지)
-                        preferenceManager.setCurrentPoints((currentPoints - actualPenalty).coerceAtLeast(0))
+                        val newPoints = (currentPoints - actualPenalty).coerceAtLeast(0)
+                        preferenceManager.setCurrentPoints(newPoints)
+                        
+                        Log.w(TAG, "포인트 차감 완료: ${actualPenalty} WP 차감 (기존: ${currentPoints} WP → 현재: ${newPoints} WP), 사유: $reason")
+                    } else {
+                        Log.w(TAG, "포인트 차감 실패: 현재 포인트(${currentPoints} WP)가 부족하여 차감 불가, 요청된 페널티: ${penalty} WP")
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error applying penalty in transaction: penalty=$penalty, reason=$reason", e)

@@ -6,9 +6,12 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.usage.UsageEvents
+import android.app.usage.UsageStats
 import android.app.usage.UsageStatsManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -23,6 +26,7 @@ import com.faust.models.PointTransaction
 import com.faust.models.TransactionType
 import com.faust.presentation.view.MainActivity
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 
 /**
  * [시스템 진입점: 백그라운드 유지 진입점]
@@ -43,6 +47,7 @@ class PointMiningService : LifecycleService() {
     private var miningJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var consecutiveEmptyStatsCount = 0
+    private var screenEventReceiver: BroadcastReceiver? = null
 
     companion object {
         private const val MAX_CONSECUTIVE_EMPTY_STATS = 3 // 3회 연속 실패 시 재시도 예약
@@ -68,6 +73,44 @@ class PointMiningService : LifecycleService() {
             val intent = Intent(context, PointMiningService::class.java)
             context.stopService(intent)
         }
+
+        /**
+         * 사용자가 '강행'을 선택했을 때 단 한 번 벌금을 부과합니다.
+         * @param context Context (ApplicationContext 권장)
+         * @param penaltyAmount 벌금 액수 (예: 10)
+         */
+        fun applyOneTimePenalty(context: Context, penaltyAmount: Int) {
+            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                try {
+                    val database = (context.applicationContext as FaustApplication).database
+                    val preferenceManager = PreferenceManager(context)
+                    
+                    if (penaltyAmount <= 0) return@launch
+                    
+                    Log.w(TAG, "사용자 강행 선택: 벌금 ${penaltyAmount}WP 부과")
+                    
+                    val currentPoints = database.pointTransactionDao().getTotalPoints() ?: 0
+                    val actualPenalty = penaltyAmount.coerceAtMost(currentPoints)
+                    
+                    database.withTransaction {
+                        database.pointTransactionDao().insertTransaction(
+                            PointTransaction(
+                                amount = -actualPenalty,
+                                type = TransactionType.PENALTY,
+                                reason = "차단 앱 강행 사용으로 인한 벌점"
+                            )
+                        )
+                    }
+                    // UI 동기화를 위해 현재 포인트 갱신
+                    val newPoints = (currentPoints - actualPenalty).coerceAtLeast(0)
+                    preferenceManager.setCurrentPoints(newPoints)
+                    
+                    Log.w(TAG, "강행 포인트 차감 완료: ${actualPenalty} WP 차감 (기존: ${currentPoints} WP → 현재: ${newPoints} WP)")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to apply one-time penalty", e)
+                }
+            }
+        }
     }
 
     override fun onCreate() {
@@ -76,6 +119,9 @@ class PointMiningService : LifecycleService() {
         // Foreground Service 시작 (앱이 종료되어도 죽지 않음)
         startForeground(NOTIFICATION_ID, createNotification())
         preferenceManager.setServiceRunning(true)
+        
+        // 화면 이벤트 리시버 등록
+        registerScreenEventReceiver()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -83,9 +129,11 @@ class PointMiningService : LifecycleService() {
         
         // 서비스 시작 시 타이머를 현재 시간으로 리셋 (과거 기록으로 인한 오적립 방지)
         preferenceManager.setLastMiningTime(System.currentTimeMillis())
+        // 화면이 켜져있는 상태로 시작하므로 lastScreenOnTime 설정
+        preferenceManager.setLastScreenOnTime(System.currentTimeMillis())
         Log.d(TAG, "Mining Service Started - Timer Reset")
 
-        startMining()
+        startMiningJob()
         return START_STICKY
     }
 
@@ -94,6 +142,7 @@ class PointMiningService : LifecycleService() {
         miningJob?.cancel()
         serviceScope.cancel()
         cancelRetryAlarm()
+        unregisterScreenEventReceiver()
         preferenceManager.setServiceRunning(false)
         Log.d(TAG, "Mining Service Stopped")
     }
@@ -103,7 +152,11 @@ class PointMiningService : LifecycleService() {
         return null
     }
 
-    private fun startMining() {
+    /**
+     * 실시간 10초 주기 타이머를 시작합니다.
+     * 화면이 켜져있을 때만 실행되며, 화면이 꺼지면 중지됩니다.
+     */
+    private fun startMiningJob() {
         miningJob?.cancel()
         miningJob = serviceScope.launch {
             while (isActive) {
@@ -115,6 +168,7 @@ class PointMiningService : LifecycleService() {
                 }
             }
         }
+        Log.d(TAG, "Mining Job Started")
     }
 
     private suspend fun processMining() {
@@ -131,17 +185,20 @@ class PointMiningService : LifecycleService() {
         consecutiveEmptyStatsCount = 0
         cancelRetryAlarm()
 
-        // 2. 차단된 앱인지 확인
+        // 2. 차단된 앱인지 확인 (유죄 협상/위반 감지)
         val isBlocked = database.appBlockDao().getBlockedApp(currentApp) != null
+        
         if (isBlocked) {
-            Log.d(TAG, "Mining paused: $currentApp is blocked ⛔")
-            // 차단 앱 사용 시 타이머 리셋 (채굴 중단)
+            // 차단 앱 감지: 포인트 적립이 일시 중단됩니다.
+            Log.d(TAG, "차단 앱 감지: $currentApp. 포인트 적립이 일시 중단됩니다.")
+            
+            // 적립 타이머만 현재 시간으로 갱신하여 점수가 쌓이지 않게 차단합니다.
             preferenceManager.setLastMiningTime(System.currentTimeMillis())
             preferenceManager.setLastMiningApp(currentApp)
             return
         }
 
-        // 3. 타이머 로직
+        // 3. 정상 상태 (디톡스 중): 시간 경과에 따라 포인트 증정
         var lastMiningTime = preferenceManager.getLastMiningTime()
         if (lastMiningTime == 0L) {
             lastMiningTime = System.currentTimeMillis()
@@ -155,16 +212,14 @@ class PointMiningService : LifecycleService() {
 
         // 4. 포인트 적립 (1분 이상 경과 시)
         if (elapsedMinutes >= 1) {
-            // 테스트용: 1분당 1포인트 고정
-            val pointsToAdd = 1
-
-            addMiningPoints(pointsToAdd)
-
+            // 1분당 1포인트 자동 적립
+            addMiningPoints(1)
+            
             // 5. 시간 갱신 (Dripping: 소진된 1분만 더해줌)
             val newTime = lastMiningTime + (1000 * 60)
             preferenceManager.setLastMiningTime(newTime)
 
-            Log.d(TAG, "💰 Point Added! Next check starts from: $newTime")
+            Log.d(TAG, "디톡스 유지 중: 1포인트 적립 완료 💎")
         }
 
         // 앱이 바뀌어도 차단 앱만 아니면 계속 채굴 유지
@@ -191,6 +246,39 @@ class PointMiningService : LifecycleService() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to add points", e)
         }
+    }
+
+    /**
+     * 차단 앱 사용으로 인한 포인트 차감 함수
+     * 손실 회피 심리를 활용하여 사용자가 차단 앱을 사용하지 않도록 동기부여를 제공합니다.
+     */
+    private suspend fun subtractPoints(points: Int) {
+        if (points <= 0) return
+        try {
+            database.withTransaction {
+                database.pointTransactionDao().insertTransaction(
+                    PointTransaction(
+                        amount = -points, // 음수 값으로 저장
+                        type = TransactionType.PENALTY, // 'MINING' 대신 'PENALTY' 타입 사용
+                        reason = "차단 앱 사용으로 인한 벌점"
+                    )
+                )
+            }
+            // UI 동기화를 위해 현재 포인트 갱신
+            val currentPoints = database.pointTransactionDao().getTotalPoints() ?: 0
+            preferenceManager.setCurrentPoints(currentPoints.coerceAtLeast(0))
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to subtract points", e)
+        }
+    }
+
+    /**
+     * 사용자가 '강행'을 선택했을 때 단 한 번 벌금을 부과합니다.
+     * @param penaltyAmount 벌금 액수 (예: 10)
+     */
+    suspend fun applyOneTimePenalty(penaltyAmount: Int) {
+        Log.w(TAG, "사용자 강행 선택: 벌금 ${penaltyAmount}WP 부과")
+        subtractPoints(penaltyAmount) // 기존에 정의된 차감 함수 활용
     }
 
     /**
@@ -312,6 +400,92 @@ class PointMiningService : LifecycleService() {
             null
         }
     }
+
+    /**
+     * 화면 이벤트 리시버를 등록합니다.
+     * ACTION_SCREEN_ON과 ACTION_SCREEN_OFF 이벤트를 감지합니다.
+     */
+    private fun registerScreenEventReceiver() {
+        screenEventReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_ON -> {
+                        Log.d(TAG, "Screen ON: 정산 시작 및 타이머 재개")
+                        // 1. 화면이 꺼져있던 동안의 포인트 일괄 계산 로직 실행
+                        //    (calculateAccumulatedPoints 내부에서 시간 리셋 처리)
+                        serviceScope.launch {
+                            calculateAccumulatedPoints()
+                        }
+                        // 2. 10초 주기 타이머 다시 시작
+                        startMiningJob()
+                    }
+                    Intent.ACTION_SCREEN_OFF -> {
+                        Log.d(TAG, "Screen OFF: 타이머 중지 및 절전 모드")
+                        // 타이머 중지 (Coroutine Job cancel)
+                        miningJob?.cancel()
+                        miningJob = null
+                        // 화면이 꺼진 시간 저장
+                        preferenceManager.setLastScreenOffTime(System.currentTimeMillis())
+                    }
+                }
+            }
+        }
+        
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        registerReceiver(screenEventReceiver, filter)
+        Log.d(TAG, "Screen Event Receiver Registered")
+    }
+
+    /**
+     * 화면 이벤트 리시버를 해제합니다.
+     */
+    private fun unregisterScreenEventReceiver() {
+        screenEventReceiver?.let {
+            try {
+                unregisterReceiver(it)
+                screenEventReceiver = null
+                Log.d(TAG, "Screen Event Receiver Unregistered")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error unregistering screen event receiver", e)
+            }
+        }
+    }
+
+    /**
+     * 화면이 꺼져있던 동안의 포인트를 일괄 계산합니다.
+     * 화면이 꺼져 있는 동안은 차단 앱을 쓸 수 없으므로(대부분의 경우),
+     * "폰을 꺼둔 시간 = 100% 성공 시간"으로 간주하여 한꺼번에 점수를 줍니다.
+     * 
+     * 단순화된 로직: 화면이 꺼진 시간부터 화면이 켜진 시간까지의 시간만 계산하여 포인트 지급
+     */
+    private suspend fun calculateAccumulatedPoints() {
+        val startTime = preferenceManager.getLastScreenOffTime()
+        val endTime = System.currentTimeMillis()
+
+        // 시작 시간이 0이면 (첫 실행 등) 스킵
+        if (startTime == 0L) {
+            Log.d(TAG, "calculateAccumulatedPoints: No previous screen off time, skipping")
+            return
+        }
+
+        // 화면이 꺼진 시간부터 현재까지의 시간(분) 계산
+        val offDurationMinutes = ((endTime - startTime) / (1000 * 60)).toInt()
+
+        if (offDurationMinutes > 0) {
+            // 휴대폰을 꺼두고 유혹을 참은 시간만큼 보너스 포인트 지급!
+            addMiningPoints(offDurationMinutes)
+            Log.d(TAG, "부재 중 디톡스 성공: ${offDurationMinutes}포인트 일괄 지급 🎁")
+        } else {
+            Log.d(TAG, "calculateAccumulatedPoints: No duration to calculate")
+        }
+        
+        // 정산 후에는 반드시 시간 리셋
+        preferenceManager.setLastScreenOnTime(endTime)
+    }
+
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

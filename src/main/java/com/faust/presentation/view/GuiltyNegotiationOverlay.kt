@@ -29,6 +29,7 @@ import com.faust.domain.persona.handlers.HapticHandlerImpl
 import com.faust.domain.persona.handlers.VisualHandler
 import com.faust.domain.persona.handlers.VisualHandlerImpl
 import com.faust.services.AppBlockingService
+import com.faust.services.PointMiningService
 import kotlinx.coroutines.*
 
 /**
@@ -300,9 +301,9 @@ class GuiltyNegotiationOverlay(
     /**
      * [핵심 이벤트: 포인트 및 페널티 이벤트 - onProceed]
      * 
-     * 역할: 사용자가 오버레이에서 '강행'을 선택할 때 발생하며, PenaltyService를 통해 6 WP를 차감하고 오버레이를 닫습니다.
+     * 역할: 사용자가 오버레이에서 '강행'을 선택할 때 발생하며, PointMiningService를 통해 일회성 벌금을 부과하고 오버레이를 닫습니다.
      * 트리거: 사용자가 오버레이의 '강행' 버튼 클릭
-     * 처리: PenaltyService.applyLaunchPenalty() 호출 (모든 티어: 6 WP 차감, 즉시 완료 대기), 오버레이 닫기
+     * 처리: PointMiningService.applyOneTimePenalty() 호출 (벌금 액수: 6 WP), 오버레이 닫기
      * 
      * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
      */
@@ -317,12 +318,13 @@ class GuiltyNegotiationOverlay(
         // 현재 context(AppBlockingService)에 허용 패키지 등록 (Grace Period)
         (context as? AppBlockingService)?.setAllowedPackage(packageName)
         
-        // 강행 실행 - 페널티 적용 (즉시 완료 대기)
-        coroutineScope.launch {
-            penaltyService.applyLaunchPenalty(packageName, appName)
-            // 트랜잭션 완료 후 오버레이 닫기
-            dismiss(force = true)
-        }
+        // 강행 실행 - 일회성 벌금 적용 (벌금 액수: 6 WP)
+        val penaltyAmount = 6
+        Log.w(TAG, "강행 버튼 클릭: ${penaltyAmount} WP 차감 예정")
+        PointMiningService.applyOneTimePenalty(context, penaltyAmount)
+        
+        // 오버레이 닫기
+        dismiss(force = true)
     }
 
     /**
@@ -343,6 +345,7 @@ class GuiltyNegotiationOverlay(
         isUserActionCompleted = true
         
         // 철회 - 페널티 적용 (즉시 완료 대기)
+        Log.w(TAG, "철회 버튼 클릭: 포인트 차감 예정 (티어에 따라 결정)")
         coroutineScope.launch {
             penaltyService.applyQuitPenalty(packageName, appName)
             

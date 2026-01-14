@@ -8,10 +8,21 @@ import android.os.Build
  */
 object AppCategoryUtils {
     /**
+     * 크롬 브라우저 패키지명
+     */
+    private const val CHROME_PACKAGE_NAME = "com.android.chrome"
+
+    /**
      * ApplicationInfo의 category를 가져옵니다.
      * API 26 미만에서는 CATEGORY_UNDEFINED를 반환합니다.
+     * 크롬은 소셜 카테고리에서 제외하고 브라우저로 분류합니다.
      */
     fun getAppCategory(applicationInfo: ApplicationInfo): Int {
+        // 크롬을 소셜 카테고리에서 제외하고 브라우저로 분류
+        if (applicationInfo.packageName == CHROME_PACKAGE_NAME) {
+            return CATEGORY_BROWSER
+        }
+        
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             applicationInfo.category
         } else {
@@ -26,6 +37,7 @@ object AppCategoryUtils {
     const val CATEGORY_SOCIAL = ApplicationInfo.CATEGORY_SOCIAL
     const val CATEGORY_GAME = ApplicationInfo.CATEGORY_GAME
     const val CATEGORY_VIDEO = ApplicationInfo.CATEGORY_VIDEO
+    const val CATEGORY_BROWSER = -2  // 브라우저 카테고리 (고유한 값)
     const val CATEGORY_OTHER = ApplicationInfo.CATEGORY_UNDEFINED
 
     /**
@@ -37,6 +49,7 @@ object AppCategoryUtils {
             CATEGORY_SOCIAL -> "소셜"
             CATEGORY_GAME -> "게임"
             CATEGORY_VIDEO -> "비디오"
+            CATEGORY_BROWSER -> "브라우저"
             CATEGORY_OTHER -> "기타"
             else -> "기타"
         }
@@ -51,6 +64,7 @@ object AppCategoryUtils {
             CATEGORY_SOCIAL -> "💬"
             CATEGORY_GAME -> "🎮"
             CATEGORY_VIDEO -> "🎬"
+            CATEGORY_BROWSER -> "🌐"
             CATEGORY_OTHER -> "📂"
             else -> "📂"
         }
@@ -65,7 +79,8 @@ object AppCategoryUtils {
             CATEGORY_OTHER -> appCategory == ApplicationInfo.CATEGORY_UNDEFINED || 
                              (appCategory != CATEGORY_SOCIAL && 
                               appCategory != CATEGORY_GAME && 
-                              appCategory != CATEGORY_VIDEO)
+                              appCategory != CATEGORY_VIDEO &&
+                              appCategory != CATEGORY_BROWSER)
             else -> appCategory == filterCategory
         }
     }

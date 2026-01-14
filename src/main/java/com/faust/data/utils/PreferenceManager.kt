@@ -34,6 +34,8 @@ class PreferenceManager(context: Context) {
         private const val KEY_LAST_RESET_TIME = "last_reset_time"
         private const val KEY_IS_SERVICE_RUNNING = "is_service_running"
         private const val KEY_PERSONA_TYPE = "persona_type"
+        private const val KEY_LAST_SCREEN_OFF_TIME = "last_screen_off_time"
+        private const val KEY_LAST_SCREEN_ON_TIME = "last_screen_on_time"
 
         /**
          * EncryptedSharedPreferences 인스턴스를 생성합니다.
@@ -186,6 +188,71 @@ class PreferenceManager(context: Context) {
             prefs.edit().putString(KEY_PERSONA_TYPE, type).apply()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set persona type", e)
+        }
+    }
+
+    // Screen Event Tracking
+    fun getLastScreenOffTime(): Long {
+        return try {
+            prefs.getLong(KEY_LAST_SCREEN_OFF_TIME, 0)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get last screen off time", e)
+            0L
+        }
+    }
+
+    fun setLastScreenOffTime(time: Long) {
+        try {
+            prefs.edit().putLong(KEY_LAST_SCREEN_OFF_TIME, time).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set last screen off time", e)
+        }
+    }
+
+    fun getLastScreenOnTime(): Long {
+        return try {
+            prefs.getLong(KEY_LAST_SCREEN_ON_TIME, 0)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get last screen on time", e)
+            0L
+        }
+    }
+
+    fun setLastScreenOnTime(time: Long) {
+        try {
+            prefs.edit().putLong(KEY_LAST_SCREEN_ON_TIME, time).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set last screen on time", e)
+        }
+    }
+
+    // App-specific Last Settled Time (for preventing duplicate point calculation)
+    /**
+     * 앱별로 마지막 정산 시점의 총 사용 시간(분)을 조회합니다.
+     * @param packageName 앱 패키지 이름
+     * @return 마지막 정산 시점의 총 사용 시간(분), 없으면 0
+     */
+    fun getLastSettledTime(packageName: String): Long {
+        return try {
+            val key = "last_settled_time_$packageName"
+            prefs.getLong(key, 0)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get last settled time for $packageName", e)
+            0L
+        }
+    }
+
+    /**
+     * 앱별로 마지막 정산 시점의 총 사용 시간(분)을 저장합니다.
+     * @param packageName 앱 패키지 이름
+     * @param timeInMinutes 마지막 정산 시점의 총 사용 시간(분)
+     */
+    fun setLastSettledTime(packageName: String, timeInMinutes: Long) {
+        try {
+            val key = "last_settled_time_$packageName"
+            prefs.edit().putLong(key, timeInMinutes).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set last settled time for $packageName", e)
         }
     }
 
