@@ -15,6 +15,8 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import com.faust.FaustApplication
 import com.faust.data.database.FaustDatabase
+import com.faust.data.utils.PreferenceManager
+import com.faust.domain.PenaltyService
 import com.faust.presentation.view.GuiltyNegotiationOverlay
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
@@ -33,6 +35,9 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     private val database: FaustDatabase by lazy {
         (application as FaustApplication).database
     }
+    private val preferenceManager: PreferenceManager by lazy {
+        PreferenceManager(this)
+    }
     private var blockedAppsFlowJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var currentOverlay: GuiltyNegotiationOverlay? = null
@@ -44,6 +49,15 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     // 페널티를 지불한 앱을 기억하는 변수 (Grace Period)
     private var lastAllowedPackage: String? = null
     
+    // [추가] PenaltyService 인스턴스 (lazy 초기화)
+    private val penaltyService: PenaltyService by lazy {
+        PenaltyService(this)
+    }
+    
+    // [추가] 현재 협상 중인 앱 정보 저장용
+    private var currentBlockedPackage: String? = null
+    private var currentBlockedAppName: String? = null
+    
     // 화면 OFF 감지용 BroadcastReceiver
     private var screenOffReceiver: BroadcastReceiver? = null
     
@@ -54,7 +68,16 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         get() = lifecycleRegistry
 
     companion object {
+        private const val TAG = "AppBlockingService" // [추가] 로그 태그 정의
         private val DELAY_BEFORE_OVERLAY_MS = 4000L..6000L // 4-6초 지연
+        
+        /**
+         * 시스템 UI 패키지 목록 - 화면 꺼짐/잠금 시 실행되는 시스템 패키지를 무시하기 위함
+         */
+        private val IGNORED_PACKAGES = setOf(
+            "com.android.systemui",
+            "com.android.keyguard"
+        )
 
         /**
          * 접근성 서비스가 활성화되어 있는지 확인
@@ -177,17 +200,33 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
      * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
      */
     private fun handleAppLaunch(packageName: String) {
+        // 1. 오버레이가 활성화 상태라면, 키보드나 다른 앱이 감지되어도 차단을 풀지 않고 무시함
+        if (currentOverlay != null) {
+            Log.d(TAG, "오버레이 활성 상태: 패키지 변경 무시 ($packageName)")
+            return
+        }
+        
+        // 2. 시스템 UI(상단바, 잠금화면)는 무시
+        if (packageName in IGNORED_PACKAGES) {
+            Log.d(TAG, "시스템 UI 패키지 무시: $packageName")
+            return
+        }
+        
         // 메모리 캐시에서 차단 여부 확인
         val isBlocked = blockedAppsCache.contains(packageName)
         
         if (isBlocked) {
             // Step 1: 즉시 포인트 적립 중단
             PointMiningService.pauseMining()
-            Log.d("Faust", "Mining Paused: 차단 앱 감지 ($packageName)")
+            Log.d(TAG, "Mining Paused: 차단 앱 감지 ($packageName)")
+            
+            // 차단 앱 감지 시 PreferenceManager에 저장 (오디오 감지 정확도 향상)
+            preferenceManager.setLastMiningApp(packageName)
+            Log.d(TAG, "Last mining app updated: $packageName")
             
             // Step 2: Grace Period 체크 (벌금 지불 완료)
             if (packageName == lastAllowedPackage) {
-                Log.d("Faust", "Grace Period: 오버레이 표시 안 함")
+                Log.d(TAG, "Grace Period: 오버레이 표시 안 함")
                 return
             }
             
@@ -205,7 +244,11 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         } else {
             // 허용 앱: 포인트 적립 재개
             PointMiningService.resumeMining()
-            Log.d("Faust", "Mining Resumed: 허용 앱으로 전환")
+            Log.d(TAG, "Mining Resumed: 허용 앱으로 전환")
+            
+            // 허용 앱으로 전환 시 PreferenceManager에 저장
+            preferenceManager.setLastMiningApp(packageName)
+            Log.d(TAG, "Last mining app updated: $packageName")
             
             // Grace Period 초기화 및 오버레이 숨김
             lastAllowedPackage = null
@@ -231,6 +274,11 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
      * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
      */
     private fun showOverlay(packageName: String, appName: String) {
+        // [추가] 현재 차단된 앱 정보 저장 (화면 OFF 시 철회 처리를 위해)
+        // 코루틴 밖에서 실행하여 즉시 저장
+        this.currentBlockedPackage = packageName
+        this.currentBlockedAppName = appName
+
         serviceScope.launch(Dispatchers.Main) {
             if (currentOverlay == null) {
                 currentOverlay = GuiltyNegotiationOverlay(this@AppBlockingService).apply {
@@ -240,10 +288,14 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         }
     }
 
-    private fun hideOverlay() {
+    fun hideOverlay() { // private 제거
         serviceScope.launch(Dispatchers.Main) {
-            currentOverlay?.dismiss()
-            currentOverlay = null
+            currentOverlay?.dismiss(force = true) // 강제 종료 플래그 전달
+            currentOverlay = null // 핵심: 참조를 null로 만들어 중복 감지 방지
+            
+            // [추가] 앱 정보 초기화
+            currentBlockedPackage = null
+            currentBlockedAppName = null
         }
     }
 
@@ -262,23 +314,106 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
      */
     private fun registerScreenOffReceiver() {
         screenOffReceiver = object : BroadcastReceiver() {
+            /**
+             * 강화된 홈 화면 이동 로직
+             * 화면 OFF 상태에서는 Intent 방식을 우선 시도하고, 동시에 performGlobalAction도 호출합니다.
+             * @param contextLabel 로그에 사용할 컨텍스트 레이블 (예: "협상 중", "차단 상태")
+             */
+            private fun navigateToHome(contextLabel: String) {
+                Log.d(TAG, "화면 OFF 시 홈 이동 시작 ($contextLabel)")
+                
+                // 화면이 꺼진 상태에서는 Intent 방식이 더 확실하므로 우선 시도
+                val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                    addCategory(Intent.CATEGORY_HOME)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+                
+                try {
+                    this@AppBlockingService.startActivity(homeIntent)
+                    Log.d(TAG, "화면 OFF 시 Intent 방식으로 홈 이동 시도 ($contextLabel)")
+                } catch (e: Exception) {
+                    Log.e(TAG, "화면 OFF 시 Intent 방식 홈 이동 실패 ($contextLabel)", e)
+                }
+                
+                // 동시에 performGlobalAction도 호출 (이중 보장)
+                val homeResult = performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+                if (homeResult) {
+                    Log.d(TAG, "화면 OFF 시 performGlobalAction 성공 ($contextLabel)")
+                } else {
+                    Log.e(TAG, "화면 OFF 시 performGlobalAction 실패 ($contextLabel)")
+                    
+                    // 실패 시 100ms 지연 후 재시도
+                    serviceScope.launch {
+                        delay(100)
+                        
+                        // Intent 재시도
+                        try {
+                            this@AppBlockingService.startActivity(homeIntent)
+                            Log.d(TAG, "화면 OFF 시 Intent 방식 재시도 ($contextLabel)")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "화면 OFF 시 Intent 방식 재시도 실패 ($contextLabel)", e)
+                        }
+                        
+                        // performGlobalAction 재시도
+                        val retryResult = performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+                        if (retryResult) {
+                            Log.d(TAG, "화면 OFF 시 performGlobalAction 재시도 성공 ($contextLabel)")
+                        } else {
+                            Log.e(TAG, "화면 OFF 시 performGlobalAction 재시도 실패 ($contextLabel)")
+                        }
+                    }
+                }
+            }
+            
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == Intent.ACTION_SCREEN_OFF) {
-                    // PointMiningService의 상태 확인
-                    if (PointMiningService.isMiningPaused()) {
-                        Log.d("Faust", "차단 앱 사용 중 화면 OFF 감지 -> 강제 홈 이동 수행")
-                        performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+                    
+                    // Case 1: 협상 중(오버레이 뜸)에 화면 끔 -> '철회'로 간주
+                    if (currentOverlay != null) {
+                        Log.d(TAG, "협상 중 도주 감지: 철회 패널티 부과")
+
+                        // 필요한 데이터 로컬 변수에 캡처 (비동기 처리를 위해)
+                        val targetPackage = currentBlockedPackage
+                        val targetAppName = currentBlockedAppName ?: targetPackage ?: "Unknown App"
+
+                        // 1. 비동기: 철회 패널티 적용 (DB 작업)
+                        serviceScope.launch {
+                            if (targetPackage != null) {
+                                try {
+                                    penaltyService.applyQuitPenalty(targetPackage, targetAppName)
+                                    Log.d(TAG, "화면 OFF 철회 패널티 적용 완료: $targetAppName")
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "철회 패널티 적용 실패", e)
+                                }
+                            }
+                        }
+
+                        // 2. 동기: UI 및 시스템 상태 즉시 정리 (반응성 확보)
+                        // 오버레이 강제 종료 (force = true)
+                        currentOverlay?.dismiss(force = true)
+                        currentOverlay = null
                         
-                        // 홈으로 보냈으므로 상태를 '클린'하게 초기화 (다음번 켤 때 정산 가능하도록)
+                        // 변수 초기화
+                        currentBlockedPackage = null
+                        currentBlockedAppName = null
+
+                        // 홈 화면 이동 및 적립 재개
+                        navigateToHome("협상 중")
+                        PointMiningService.resumeMining()
+                    }
+                    // Case 2: 오버레이 없이 차단 상태 (Grace Period 또는 로딩 중) -> 그냥 홈 이동
+                    else if (PointMiningService.isMiningPaused()) {
+                        Log.d(TAG, "차단 상태(오버레이 없음)에서 화면 OFF -> 홈 이동")
+                        navigateToHome("차단 상태")
                         PointMiningService.resumeMining()
                     }
                 }
             }
         }
-        
+
         val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
         registerReceiver(screenOffReceiver, filter)
-        Log.d("Faust", "Screen OFF Receiver Registered")
+        Log.d(TAG, "Screen OFF Receiver Registered")
     }
     
     /**
@@ -289,9 +424,9 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             try {
                 unregisterReceiver(it)
                 screenOffReceiver = null
-                Log.d("Faust", "Screen OFF Receiver Unregistered")
+                Log.d(TAG, "Screen OFF Receiver Unregistered")
             } catch (e: Exception) {
-                Log.e("Faust", "Error unregistering screen off receiver", e)
+                Log.e(TAG, "Error unregistering screen off receiver", e)
             }
         }
     }

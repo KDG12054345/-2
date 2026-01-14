@@ -11,6 +11,7 @@ import android.content.IntentFilter
 import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
@@ -23,6 +24,7 @@ import com.faust.models.PointTransaction
 import com.faust.models.TransactionType
 import com.faust.presentation.view.MainActivity
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 
 /**
  * [시스템 진입점: 백그라운드 유지 진입점]
@@ -41,6 +43,7 @@ class PointMiningService : LifecycleService() {
         PreferenceManager(this)
     }
     private var miningJob: Job? = null
+    private var audioMonitoringJob: Job? = null  // 화면 OFF 시 오디오 모니터링 Job
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var screenEventReceiver: BroadcastReceiver? = null
     
@@ -151,6 +154,10 @@ class PointMiningService : LifecycleService() {
         super.onStartCommand(intent, flags, startId)
         
         Log.d(TAG, "Mining Service Started")
+        
+        // 실제 화면 상태 확인 및 초기화
+        checkAndUpdateScreenState()
+        
         startMiningJob()
         return START_STICKY
     }
@@ -159,6 +166,7 @@ class PointMiningService : LifecycleService() {
         super.onDestroy()
         instance = null
         miningJob?.cancel()
+        audioMonitoringJob?.cancel()  // 오디오 모니터링 Job도 취소
         serviceScope.cancel()
         unregisterScreenEventReceiver()
         preferenceManager.setServiceRunning(false)
@@ -168,6 +176,31 @@ class PointMiningService : LifecycleService() {
     override fun onBind(intent: Intent): IBinder? {
         super.onBind(intent)
         return null
+    }
+
+    /**
+     * 실제 화면 상태를 확인하고 isScreenOn 변수를 업데이트합니다.
+     */
+    private fun checkAndUpdateScreenState() {
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val wasScreenOn = isScreenOn
+            isScreenOn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
+                powerManager.isInteractive
+            } else {
+                @Suppress("DEPRECATION")
+                powerManager.isScreenOn
+            }
+            
+            if (wasScreenOn != isScreenOn) {
+                Log.d(TAG, "화면 상태 확인: ${if (isScreenOn) "ON" else "OFF"} (이전: ${if (wasScreenOn) "ON" else "OFF"})")
+            } else {
+                Log.d(TAG, "화면 상태 확인: ${if (isScreenOn) "ON" else "OFF"}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "화면 상태 확인 실패, 기본값 사용", e)
+            // 기본값은 이미 true로 설정되어 있음
+        }
     }
 
     /**
@@ -182,14 +215,16 @@ class PointMiningService : LifecycleService() {
                     delay(60_000L) // 1분 대기
                     if (isScreenOn && !isMiningPaused) {
                         addMiningPoints(1)
-                        Log.d(TAG, "포인트 적립: 1 WP")
+                        Log.d(TAG, "포인트 적립: 1 WP (화면: ${if (isScreenOn) "ON" else "OFF"}, 일시정지: $isMiningPaused)")
+                    } else {
+                        Log.d(TAG, "포인트 적립 스킵 (화면: ${if (isScreenOn) "ON" else "OFF"}, 일시정지: $isMiningPaused)")
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in mining loop", e)
                 }
             }
         }
-        Log.d(TAG, "Mining Job Started")
+        Log.d(TAG, "Mining Job Started (화면: ${if (isScreenOn) "ON" else "OFF"}, 일시정지: $isMiningPaused)")
     }
 
 
@@ -250,6 +285,9 @@ class PointMiningService : LifecycleService() {
                     Intent.ACTION_SCREEN_ON -> {
                         isScreenOn = true
                         Log.d(TAG, "Screen ON: 정산 시작 및 타이머 재개")
+                        // 오디오 모니터링 중지
+                        audioMonitoringJob?.cancel()
+                        audioMonitoringJob = null
                         // 1. 화면이 꺼져있던 동안의 포인트 일괄 계산 로직 실행
                         serviceScope.launch {
                             calculateAccumulatedPoints()
@@ -265,6 +303,8 @@ class PointMiningService : LifecycleService() {
                         miningJob = null
                         // 화면이 꺼진 시간 저장 (보너스 계산 기준점)
                         preferenceManager.setLastScreenOffTime(System.currentTimeMillis())
+                        // 오디오 모니터링 시작 (차단 앱 음성 감지)
+                        startAudioMonitoring()
                         // 주의: isMiningPaused는 절대 변경하지 않음
                     }
                 }
@@ -295,6 +335,76 @@ class PointMiningService : LifecycleService() {
     }
 
     /**
+     * 화면 OFF 상태에서 차단 앱의 오디오 출력을 감지합니다.
+     * 차단 앱에서 음성이 출력되면 포인트 채굴을 중단합니다.
+     */
+    private fun startAudioMonitoring() {
+        audioMonitoringJob?.cancel()
+        audioMonitoringJob = serviceScope.launch {
+            while (isActive && !isScreenOn) {
+                try {
+                    delay(10_000L) // 10초마다 확인
+                    
+                    if (isScreenOn) {
+                        // 화면이 켜졌으면 모니터링 중지
+                        break
+                    }
+                    
+                    // 차단 앱에서 오디오가 재생 중인지 확인
+                    val hasBlockedAppAudio = checkBlockedAppAudio()
+                    
+                    if (hasBlockedAppAudio && !isMiningPaused) {
+                        // 차단 앱에서 오디오 재생 중이면 포인트 채굴 일시정지
+                        isMiningPaused = true
+                        Log.w(TAG, "차단 앱 오디오 감지: 포인트 채굴 일시정지")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in audio monitoring loop", e)
+                }
+            }
+        }
+        Log.d(TAG, "Audio Monitoring Started")
+    }
+
+    /**
+     * 현재 오디오를 재생하는 앱이 차단 앱 목록에 있는지 확인합니다.
+     * 
+     * 주의: Android의 개인정보 보호 정책으로 인해 AudioPlaybackConfiguration에서
+     * 직접 패키지명을 가져올 수 없습니다. 따라서 추정(Heuristic) 방식을 사용합니다.
+     * 
+     * @return 차단 앱에서 오디오가 재생 중인 것으로 추정되면 true
+     */
+    private suspend fun checkBlockedAppAudio(): Boolean {
+        return try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            
+            // 1. 현재 오디오가 재생 중인지 확인
+            if (!audioManager.isMusicActive) {
+                return false
+            }
+            
+            // 2. 마지막으로 감지된 앱이 차단 목록에 있었는지 확인
+            // PreferenceManager에 저장된 마지막 앱 정보를 활용합니다.
+            val lastApp = preferenceManager.getLastMiningApp()
+            if (lastApp != null) {
+                val isBlocked = withContext(Dispatchers.IO) {
+                    database.appBlockDao().getBlockedApp(lastApp) != null
+                }
+                
+                if (isBlocked) {
+                    Log.d(TAG, "차단 앱($lastApp)에서 오디오 재생 중인 것으로 추정됨")
+                    return true
+                }
+            }
+            
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to check blocked app audio", e)
+            false
+        }
+    }
+
+    /**
      * 화면이 꺼져있던 동안의 포인트를 일괄 계산합니다.
      * 보안 로직을 통해 꼼수를 차단합니다.
      */
@@ -305,10 +415,9 @@ class PointMiningService : LifecycleService() {
             return
         }
 
-        // 2. 오디오 꼼수 감지
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        if (audioManager.isMusicActive) {
-            Log.d(TAG, "백그라운드 오디오 재생 감지 -> 정산 제외")
+        // 2. 차단 앱 오디오 감지 (화면 OFF 중 차단 앱에서 음성 출력)
+        if (checkBlockedAppAudio()) {
+            Log.d(TAG, "차단 앱 오디오 재생 감지 -> 정산 제외")
             return
         }
 

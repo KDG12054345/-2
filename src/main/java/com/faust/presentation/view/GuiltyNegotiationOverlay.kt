@@ -135,16 +135,15 @@ class GuiltyNegotiationOverlay(
                 val editInput = view.findViewById<EditText>(R.id.editInput)
                 val proceedButton = view.findViewById<Button>(R.id.buttonProceed)
                 
-                // 지연 시간을 300ms로 늘려 안정성 확보
-                view.postDelayed({
+                // 키보드 강제 표시
+                view.post {
                     editInput.requestFocus()
                     
                     val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                    // [변경] showSoftInput 대신 toggleSoftInput 사용 (강제성 높음)
-                    imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, InputMethodManager.HIDE_IMPLICIT_ONLY)
+                    imm.showSoftInput(editInput, InputMethodManager.SHOW_IMPLICIT)
                     
-                    Log.d(TAG, "Keyboard toggled via SHOW_FORCED")
-                }, 300)
+                    Log.d(TAG, "Keyboard shown via showSoftInput")
+                }
                 
                 coroutineScope.launch {
                     val profile = personaEngine.getPersonaProfile()
@@ -309,22 +308,17 @@ class GuiltyNegotiationOverlay(
      */
     private fun onProceed() {
         Log.d(TAG, "User clicked proceed button")
-        
-        // 가장 중요: 즉시 모든 피드백 정지
         personaEngine.stopAll()
-        
         isUserActionCompleted = true
-        
-        // 현재 context(AppBlockingService)에 허용 패키지 등록 (Grace Period)
+
         (context as? AppBlockingService)?.setAllowedPackage(packageName)
-        
-        // 강행 실행 - 일회성 벌금 적용 (벌금 액수: 6 WP)
+
         val penaltyAmount = 6
         Log.w(TAG, "강행 버튼 클릭: ${penaltyAmount} WP 차감 예정")
         PointMiningService.applyOneTimePenalty(context, penaltyAmount)
-        
-        // 오버레이 닫기
-        dismiss(force = true)
+
+        // 수정: 직접 dismiss() 하지 말고 서비스를 통해 닫아서 참조를 제거합니다.
+        (context as? AppBlockingService)?.hideOverlay()
     }
 
     /**
@@ -338,38 +332,21 @@ class GuiltyNegotiationOverlay(
      */
     private fun onCancel() {
         Log.d(TAG, "User clicked cancel button")
-        
-        // 가장 중요: 즉시 모든 피드백 정지
         personaEngine.stopAll()
-        
         isUserActionCompleted = true
-        
-        // 철회 - 페널티 적용 (즉시 완료 대기)
-        Log.w(TAG, "철회 버튼 클릭: 포인트 차감 예정 (티어에 따라 결정)")
+
+        Log.w(TAG, "철회 버튼 클릭: 포인트 차감 예정")
         coroutineScope.launch {
             penaltyService.applyQuitPenalty(packageName, appName)
-            
-            // 트랜잭션 완료 후 홈 화면으로 이동
+
             val intent = Intent(Intent.ACTION_MAIN).apply {
                 addCategory(Intent.CATEGORY_HOME)
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
             context.startActivity(intent)
-            Log.d(TAG, "Launched home screen intent")
-            
-            // 오버레이 제거 및 리소스 정리
-            countdownJob?.cancel()
-            overlayView?.let { view ->
-                try {
-                    windowManager?.removeView(view)
-                    Log.d(TAG, "Overlay view removed after cancel")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to remove overlay view after cancel", e)
-                }
-            }
-            overlayView = null
-            windowManager = null
-            lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
+
+            // 수정: 직접 View를 제거하지 말고 서비스를 통해 전체 정리를 수행합니다.
+            (context as? AppBlockingService)?.hideOverlay()
         }
     }
 
@@ -395,9 +372,8 @@ class GuiltyNegotiationOverlay(
         ).apply {
             gravity = Gravity.CENTER
             dimAmount = 0.5f
-            // ALWAYS_VISIBLE로 윈도우 생성 시점부터 키보드 공간 확보 시도
-            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE or
-                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+            // 키보드 표시를 위한 softInputMode 설정
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         }
     }
     
