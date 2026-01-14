@@ -230,12 +230,46 @@ class GuiltyNegotiationOverlay(
         titleText.text = context.getString(R.string.guilty_negotiation_title)
         messageText.text = context.getString(R.string.guilty_negotiation_message)
 
-        proceedButton.setOnClickListener {
-            onProceed()
+        // ✅ 강행 버튼: 강력한 터치 리스너로 Magnifier/커서 드래그 차단
+        proceedButton.setOnTouchListener { v, event ->
+            when (event.action) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    // 핵심: 누르는 순간 true를 반환해 "내가 처리함" 선언 -> 돋보기/커서 이동 차단
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    // 손을 뗐을 때 클릭 동작 수행
+                    v.performClick() // 접근성 위해 유지
+                    
+                    // 강행 버튼 로직 실행
+                    Log.d(TAG, "강행 버튼 클릭됨 (Magnifier 차단 성공)")
+                    onProceed()
+                    
+                    true
+                }
+                else -> false
+            }
         }
 
-        cancelButton.setOnClickListener {
-            onCancel()
+        // ✅ 취소 버튼: 강력한 터치 리스너로 Magnifier/커서 드래그 차단
+        cancelButton.setOnTouchListener { v, event ->
+            when (event.action) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    // 핵심: 누르는 순간 true를 반환해 "내가 처리함" 선언 -> 돋보기/커서 이동 차단
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    // 손을 뗐을 때 클릭 동작 수행
+                    v.performClick() // 접근성 위해 유지
+                    
+                    // 취소 버튼 로직 실행
+                    Log.d(TAG, "취소 버튼 클릭됨 (Magnifier 차단 성공)")
+                    onCancel()
+                    
+                    true
+                }
+                else -> false
+            }
         }
 
         // 30초 카운트다운 시작

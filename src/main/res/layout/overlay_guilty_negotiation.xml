@@ -99,6 +99,8 @@
                         android:text="@string/cancel"
                         android:textColor="@color/white"
                         android:backgroundTint="@color/teal_700"
+                        android:focusable="true"
+                        android:focusableInTouchMode="false"
                         android:importantForAccessibility="no" />
 
                     <Button
@@ -111,6 +113,8 @@
                         android:textColor="@color/white"
                         android:backgroundTint="@color/purple_700"
                         android:enabled="false"
+                        android:focusable="true"
+                        android:focusableInTouchMode="false"
                         android:importantForAccessibility="no" />
 
                 </LinearLayout>

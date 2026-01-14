@@ -22,12 +22,12 @@ class PersonaProvider(
     /**
      * 현재 설정된 페르소나 프로필을 반환합니다.
      * 
-     * @return PersonaProfile (기본값: RHYTHMICAL)
+     * @return PersonaProfile (기본값: STREET)
      */
     fun getPersonaProfile(): PersonaProfile {
         val personaType = getPersonaType()
         return when (personaType) {
-            PersonaType.RHYTHMICAL -> createRhythmicalProfile()
+            PersonaType.STREET -> createStreetProfile()
             PersonaType.CALM -> createCalmProfile()
             PersonaType.DIPLOMATIC -> createDiplomaticProfile()
         }
@@ -36,26 +36,39 @@ class PersonaProvider(
     /**
      * PreferenceManager에서 페르소나 타입을 읽어옵니다.
      * 
-     * @return PersonaType (기본값: RHYTHMICAL)
+     * @return PersonaType (기본값: STREET)
      */
     fun getPersonaType(): PersonaType {
         return try {
             val typeName = preferenceManager.getPersonaTypeString()
             PersonaType.valueOf(typeName)
         } catch (e: IllegalArgumentException) {
-            Log.w(TAG, "Invalid persona type, defaulting to RHYTHMICAL", e)
-            PersonaType.RHYTHMICAL
+            Log.w(TAG, "Invalid persona type, defaulting to STREET", e)
+            PersonaType.STREET
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get persona type", e)
-            PersonaType.RHYTHMICAL
+            PersonaType.STREET
         }
     }
     
-    private fun createRhythmicalProfile(): PersonaProfile {
+    private fun createStreetProfile(): PersonaProfile {
+        // STREET 페르소나: 2개의 프롬프트와 오디오 중 랜덤 선택
+        val options = listOf(
+            Pair(
+                context.getString(R.string.persona_prompt_street_1),
+                R.raw.homie_bag_street
+            ),
+            Pair(
+                context.getString(R.string.persona_prompt_street_2),
+                R.raw.no_cap_street
+            )
+        )
+        
+        val selected = options.random()
         return PersonaProfile(
-            promptText = context.getString(R.string.persona_prompt_rhythmical),
+            promptText = selected.first,
             vibrationPattern = listOf(100, 50, 200, 50, 150),
-            audioResourceId = null // TODO: R.raw.persona_rhythmical 추가 시 사용
+            audioResourceId = selected.second
         )
     }
     

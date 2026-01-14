@@ -81,6 +81,8 @@
                 android:text="@string/add_app"
                 android:textSize="16sp"
                 app:icon="@android:drawable/ic_input_add"
+                android:focusable="true"
+                android:focusableInTouchMode="false"
                 android:importantForAccessibility="no" />
 
         </LinearLayout>

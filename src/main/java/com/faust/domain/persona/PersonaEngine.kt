@@ -58,7 +58,7 @@ class PersonaEngine(
             val feedbackMode = determineFeedbackMode()
             Log.d(TAG, "Feedback mode determined: $feedbackMode")
             
-            // 시각 피드백 (항상 실행)
+            // 시각 피드백 (항상 실행) - 메인 스레드에서 즉시 실행
             visualHandler.displayPrompt(
                 profile.promptText,
                 textPrompt,
@@ -81,7 +81,7 @@ class PersonaEngine(
                 }
             }
             
-            // 오디오 피드백
+            // 오디오 피드백 - 텍스트 표시와 동시에 시작되도록 비동기 실행
             if (feedbackMode == FeedbackMode.AUDIO ||
                 feedbackMode == FeedbackMode.TEXT_AUDIO ||
                 feedbackMode == FeedbackMode.ALL
@@ -103,27 +103,25 @@ class PersonaEngine(
     
     /**
      * 현재 기기 상태를 기반으로 피드백 모드를 결정합니다.
-     * Safety Net 로직을 적용하여 사용자 환경에 맞는 피드백을 제공합니다.
-     * 
-     * @return FeedbackMode
+     * 변경 사항: 휴대폰 시스템 설정을 최우선으로 따릅니다.
      */
     suspend fun determineFeedbackMode(): FeedbackMode {
         return try {
-            val isSilentMode = isSilentMode()
-            val isHeadsetConnected = audioHandler.isHeadsetConnected()
+            val isSilent = isSilentMode() // 무음 또는 진동 모드인지 확인
             
             val mode = when {
-                isHeadsetConnected && !isSilentMode -> FeedbackMode.ALL
-                !isHeadsetConnected && isSilentMode -> FeedbackMode.TEXT_VIBRATION
-                isHeadsetConnected && isSilentMode -> FeedbackMode.TEXT_VIBRATION
-                else -> FeedbackMode.TEXT
+                // 1. 휴대폰이 '소리 모드'라면 -> 이어폰 여부 상관없이 무조건 오디오 재생 (스피커/이어폰)
+                !isSilent -> FeedbackMode.ALL
+                
+                // 2. 휴대폰이 '무음/진동 모드'라면 -> 오디오 끄고 텍스트+진동
+                else -> FeedbackMode.TEXT_VIBRATION
             }
             
-            Log.d(TAG, "Feedback mode determined: mode=$mode, silent=$isSilentMode, headset=$isHeadsetConnected")
+            Log.d(TAG, "Feedback mode determined: mode=$mode, silent=$isSilent")
             mode
         } catch (e: Exception) {
             Log.e(TAG, "Failed to determine feedback mode", e)
-            FeedbackMode.TEXT // 기본값으로 폴백
+            FeedbackMode.TEXT // 에러 시 기본값
         }
     }
     

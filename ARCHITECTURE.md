@@ -419,7 +419,7 @@ sequenceDiagram
 #### PersonaProvider
 - **책임**: PreferenceManager에서 사용자가 선택한 페르소나 타입을 읽어와 해당하는 PersonaProfile을 제공합니다
 - **페르소나 타입**:
-  - `RHYTHMICAL`: 불규칙 자극 (빠른 리듬 진동)
+  - `STREET`: 불규칙 자극 (빠른 리듬 진동)
   - `CALM`: 부드러운 성찰 (부드러운 진동)
   - `DIPLOMATIC`: 규칙적 압박 (규칙적 진동)
 - **기본값**: `CALM`
@@ -600,7 +600,7 @@ erDiagram
 | last_mining_app | String | null | 마지막 채굴 앱 패키지명 |
 | last_reset_time | Long | 0 | 마지막 정산 시간 |
 | is_service_running | Boolean | false | 서비스 실행 상태 |
-| persona_type | String | "CALM" | 페르소나 타입 (RHYTHMICAL, CALM, DIPLOMATIC) |
+| persona_type | String | "CALM" | 페르소나 타입 (STREET, CALM, DIPLOMATIC) |
 
 **보안 특징**:
 - MasterKey 기반 키 관리

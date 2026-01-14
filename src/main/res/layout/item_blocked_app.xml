@@ -54,6 +54,8 @@
             android:text="제거"
             android:textSize="12sp"
             style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:focusable="true"
+            android:focusableInTouchMode="false"
             android:importantForAccessibility="no" />
 
     </LinearLayout>

@@ -8,7 +8,7 @@ enum class PersonaType {
     /**
      * 불규칙 자극: 빠르고 강렬한 피드백
      */
-    RHYTHMICAL,
+    STREET,
     
     /**
      * 부드러운 성찰: 느리고 차분한 피드백
