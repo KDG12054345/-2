@@ -1,17 +1,13 @@
 package com.faust.services
 
-import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.usage.UsageEvents
-import android.app.usage.UsageStats
-import android.app.usage.UsageStatsManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -26,14 +22,13 @@ import com.faust.models.PointTransaction
 import com.faust.models.TransactionType
 import com.faust.presentation.view.MainActivity
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.first
 
 /**
  * [시스템 진입점: 백그라운드 유지 진입점]
  * 
  * 역할: Foreground Service로 실행되어 앱이 꺼져 있어도 포인트 채굴 로직이 지속되도록 보장하는 지점입니다.
  * 트리거: MainActivity.startServices() 호출 또는 PointMiningService.startService(context) 호출
- * 처리: 1분마다 포그라운드 앱 확인, 차단되지 않은 앱 사용 시간 추적, 포인트 자동 적립
+ * 처리: 1분마다 포인트 자동 적립 (이벤트 기반 아키텍처로 전환)
  * 
  * @see ARCHITECTURE.md#시스템-진입점-system-entry-points
  */
@@ -46,19 +41,18 @@ class PointMiningService : LifecycleService() {
     }
     private var miningJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private var consecutiveEmptyStatsCount = 0
     private var screenEventReceiver: BroadcastReceiver? = null
+    
+    // 상태 관리 변수
+    private var isScreenOn = true
+    private var isMiningPaused = false
 
     companion object {
-        private const val MAX_CONSECUTIVE_EMPTY_STATS = 3 // 3회 연속 실패 시 재시도 예약
         private const val TAG = "PointMiningService"
         private const val NOTIFICATION_ID = 1002
         private const val CHANNEL_ID = "point_mining_channel"
-        private const val RETRY_ALARM_REQUEST_CODE = 1004
-        private const val RETRY_DELAY_MS = 10 * 60 * 1000L // 10분
-
-        // 테스트용 설정: 10초마다 체크, 1분당 1포인트
-        private const val MINING_INTERVAL_MS = 10_000L
+        
+        @Volatile private var instance: PointMiningService? = null
 
         fun startService(context: Context) {
             val intent = Intent(context, PointMiningService::class.java)
@@ -72,6 +66,33 @@ class PointMiningService : LifecycleService() {
         fun stopService(context: Context) {
             val intent = Intent(context, PointMiningService::class.java)
             context.stopService(intent)
+        }
+        
+        /**
+         * 외부에서 포인트 적립을 일시 중단합니다.
+         */
+        fun pauseMining() {
+            instance?.let {
+                it.isMiningPaused = true
+                Log.d(TAG, "Mining paused via external signal")
+            }
+        }
+        
+        /**
+         * 외부에서 포인트 적립을 재개합니다.
+         */
+        fun resumeMining() {
+            instance?.let {
+                it.isMiningPaused = false
+                Log.d(TAG, "Mining resumed via external signal")
+            }
+        }
+        
+        /**
+         * 현재 포인트 적립이 일시 중단되었는지 확인합니다.
+         */
+        fun isMiningPaused(): Boolean {
+            return instance?.isMiningPaused ?: false
         }
 
         /**
@@ -115,6 +136,7 @@ class PointMiningService : LifecycleService() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         createNotificationChannel()
         // Foreground Service 시작 (앱이 종료되어도 죽지 않음)
         startForeground(NOTIFICATION_ID, createNotification())
@@ -127,21 +149,16 @@ class PointMiningService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         
-        // 서비스 시작 시 타이머를 현재 시간으로 리셋 (과거 기록으로 인한 오적립 방지)
-        preferenceManager.setLastMiningTime(System.currentTimeMillis())
-        // 화면이 켜져있는 상태로 시작하므로 lastScreenOnTime 설정
-        preferenceManager.setLastScreenOnTime(System.currentTimeMillis())
-        Log.d(TAG, "Mining Service Started - Timer Reset")
-
+        Log.d(TAG, "Mining Service Started")
         startMiningJob()
         return START_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        instance = null
         miningJob?.cancel()
         serviceScope.cancel()
-        cancelRetryAlarm()
         unregisterScreenEventReceiver()
         preferenceManager.setServiceRunning(false)
         Log.d(TAG, "Mining Service Stopped")
@@ -153,77 +170,25 @@ class PointMiningService : LifecycleService() {
     }
 
     /**
-     * 실시간 10초 주기 타이머를 시작합니다.
-     * 화면이 켜져있을 때만 실행되며, 화면이 꺼지면 중지됩니다.
+     * 단순 타이머: 1분마다 포인트를 적립합니다.
+     * 화면이 켜져있고, 포인트 적립이 일시 중단되지 않았을 때만 작동합니다.
      */
     private fun startMiningJob() {
         miningJob?.cancel()
         miningJob = serviceScope.launch {
             while (isActive) {
                 try {
-                    processMining()
-                    delay(MINING_INTERVAL_MS)
+                    delay(60_000L) // 1분 대기
+                    if (isScreenOn && !isMiningPaused) {
+                        addMiningPoints(1)
+                        Log.d(TAG, "포인트 적립: 1 WP")
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in mining loop", e)
                 }
             }
         }
         Log.d(TAG, "Mining Job Started")
-    }
-
-    private suspend fun processMining() {
-        // 1. 현재 앱 감지 (queryEvents 사용)
-        val currentApp = getCurrentForegroundApp()
-        if (currentApp == null) {
-            // 감지 실패 시 이번 턴은 스킵
-            // UsageStats가 비어있을 때 방어 로직 처리
-            handleEmptyUsageStats()
-            return
-        }
-
-        // 정상적으로 앱을 감지했으면 연속 실패 카운터 리셋
-        consecutiveEmptyStatsCount = 0
-        cancelRetryAlarm()
-
-        // 2. 차단된 앱인지 확인 (유죄 협상/위반 감지)
-        val isBlocked = database.appBlockDao().getBlockedApp(currentApp) != null
-        
-        if (isBlocked) {
-            // 차단 앱 감지: 포인트 적립이 일시 중단됩니다.
-            Log.d(TAG, "차단 앱 감지: $currentApp. 포인트 적립이 일시 중단됩니다.")
-            
-            // 적립 타이머만 현재 시간으로 갱신하여 점수가 쌓이지 않게 차단합니다.
-            preferenceManager.setLastMiningTime(System.currentTimeMillis())
-            preferenceManager.setLastMiningApp(currentApp)
-            return
-        }
-
-        // 3. 정상 상태 (디톡스 중): 시간 경과에 따라 포인트 증정
-        var lastMiningTime = preferenceManager.getLastMiningTime()
-        if (lastMiningTime == 0L) {
-            lastMiningTime = System.currentTimeMillis()
-            preferenceManager.setLastMiningTime(lastMiningTime)
-        }
-
-        val currentTime = System.currentTimeMillis()
-        val elapsedMinutes = (currentTime - lastMiningTime) / (1000 * 60)
-
-        Log.d(TAG, "Mining... App: $currentApp, Elapsed: $elapsedMinutes min")
-
-        // 4. 포인트 적립 (1분 이상 경과 시)
-        if (elapsedMinutes >= 1) {
-            // 1분당 1포인트 자동 적립
-            addMiningPoints(1)
-            
-            // 5. 시간 갱신 (Dripping: 소진된 1분만 더해줌)
-            val newTime = lastMiningTime + (1000 * 60)
-            preferenceManager.setLastMiningTime(newTime)
-
-            Log.d(TAG, "디톡스 유지 중: 1포인트 적립 완료 💎")
-        }
-
-        // 앱이 바뀌어도 차단 앱만 아니면 계속 채굴 유지
-        preferenceManager.setLastMiningApp(currentApp)
     }
 
 
@@ -272,134 +237,6 @@ class PointMiningService : LifecycleService() {
         }
     }
 
-    /**
-     * 사용자가 '강행'을 선택했을 때 단 한 번 벌금을 부과합니다.
-     * @param penaltyAmount 벌금 액수 (예: 10)
-     */
-    suspend fun applyOneTimePenalty(penaltyAmount: Int) {
-        Log.w(TAG, "사용자 강행 선택: 벌금 ${penaltyAmount}WP 부과")
-        subtractPoints(penaltyAmount) // 기존에 정의된 차감 함수 활용
-    }
-
-    /**
-     * UsageStats가 비어있을 때의 방어 로직을 처리합니다.
-     * Doze mode나 배터리 최적화로 인해 UsageStats가 비어있을 수 있습니다.
-     */
-    private fun handleEmptyUsageStats() {
-        consecutiveEmptyStatsCount++
-        Log.w(TAG, "Usage stats empty - Doze mode suspected. Consecutive failures: $consecutiveEmptyStatsCount")
-
-        // 연속 실패 횟수가 임계값을 넘으면 AlarmManager로 재시도 예약
-        if (consecutiveEmptyStatsCount >= MAX_CONSECUTIVE_EMPTY_STATS) {
-            Log.w(TAG, "Too many consecutive failures. Scheduling retry in ${RETRY_DELAY_MS / 1000 / 60} minutes...")
-            scheduleRetryAlarm()
-            consecutiveEmptyStatsCount = 0 // 리셋하여 중복 예약 방지
-        }
-    }
-
-    /**
-     * AlarmManager를 이용해 일정 시간 후 서비스를 재시작하도록 예약합니다.
-     */
-    private fun scheduleRetryAlarm() {
-        try {
-            val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            val intent = Intent(this, PointMiningService::class.java)
-            val pendingIntent = PendingIntent.getService(
-                this,
-                RETRY_ALARM_REQUEST_CODE,
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
-            val triggerTime = System.currentTimeMillis() + RETRY_DELAY_MS
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                // Android 6.0 이상: setExactAndAllowWhileIdle 사용 (Doze mode에서도 작동)
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    triggerTime,
-                    pendingIntent
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                alarmManager.set(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent)
-            }
-
-            Log.d(TAG, "Retry alarm scheduled for ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(triggerTime))}")
-        } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException when scheduling retry alarm. SCHEDULE_EXACT_ALARM permission may be missing.", e)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error scheduling retry alarm", e)
-        }
-    }
-
-    /**
-     * 예약된 재시도 알람을 취소합니다.
-     */
-    private fun cancelRetryAlarm() {
-        try {
-            val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            val intent = Intent(this, PointMiningService::class.java)
-            val pendingIntent = PendingIntent.getService(
-                this,
-                RETRY_ALARM_REQUEST_CODE,
-                intent,
-                PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
-            )
-
-            if (pendingIntent != null) {
-                alarmManager.cancel(pendingIntent)
-                pendingIntent.cancel()
-                Log.d(TAG, "Retry alarm cancelled")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error cancelling retry alarm", e)
-        }
-    }
-
-    // [핵심 수정] queryEvents를 사용하여 실시간 앱 감지 성능 향상
-    private fun getCurrentForegroundApp(): String? {
-        return try {
-            val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-            val endTime = System.currentTimeMillis()
-            // 5분 전부터 탐색하여 감지 확률 높임
-            val startTime = endTime - (1000 * 60 * 5)
-
-            val events = usageStatsManager.queryEvents(startTime, endTime)
-            val event = UsageEvents.Event()
-
-            var lastPackage: String? = null
-            var lastTime = 0L
-            var hasEvents = false
-
-            while (events.hasNextEvent()) {
-                hasEvents = true
-                events.getNextEvent(event)
-                // 앱이 포그라운드로 오거나(MOVE_TO_FOREGROUND) 재개될 때(ACTIVITY_RESUMED)
-                if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
-                    event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
-                    
-                    if (event.timeStamp > lastTime) {
-                        lastTime = event.timeStamp
-                        lastPackage = event.packageName
-                    }
-                }
-            }
-
-            if (lastPackage != null) {
-                Log.d(TAG, "Detected App (Event): $lastPackage")
-            } else if (!hasEvents) {
-                // 이벤트 자체가 없는 경우 (UsageStats가 완전히 비어있음)
-                Log.w(TAG, "Usage stats completely empty - Doze mode or battery optimization may be active.")
-            } else {
-                Log.w(TAG, "Usage stats empty or no recent foreground event.")
-            }
-            lastPackage
-        } catch (e: Exception) {
-            Log.e(TAG, "Error detecting foreground app", e)
-            null
-        }
-    }
 
     /**
      * 화면 이벤트 리시버를 등록합니다.
@@ -410,22 +247,24 @@ class PointMiningService : LifecycleService() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 when (intent?.action) {
                     Intent.ACTION_SCREEN_ON -> {
+                        isScreenOn = true
                         Log.d(TAG, "Screen ON: 정산 시작 및 타이머 재개")
                         // 1. 화면이 꺼져있던 동안의 포인트 일괄 계산 로직 실행
-                        //    (calculateAccumulatedPoints 내부에서 시간 리셋 처리)
                         serviceScope.launch {
                             calculateAccumulatedPoints()
                         }
-                        // 2. 10초 주기 타이머 다시 시작
+                        // 2. 타이머 다시 시작
                         startMiningJob()
                     }
                     Intent.ACTION_SCREEN_OFF -> {
+                        isScreenOn = false
                         Log.d(TAG, "Screen OFF: 타이머 중지 및 절전 모드")
                         // 타이머 중지 (Coroutine Job cancel)
                         miningJob?.cancel()
                         miningJob = null
-                        // 화면이 꺼진 시간 저장
+                        // 화면이 꺼진 시간 저장 (보너스 계산 기준점)
                         preferenceManager.setLastScreenOffTime(System.currentTimeMillis())
+                        // 주의: isMiningPaused는 절대 변경하지 않음
                     }
                 }
             }
@@ -456,12 +295,22 @@ class PointMiningService : LifecycleService() {
 
     /**
      * 화면이 꺼져있던 동안의 포인트를 일괄 계산합니다.
-     * 화면이 꺼져 있는 동안은 차단 앱을 쓸 수 없으므로(대부분의 경우),
-     * "폰을 꺼둔 시간 = 100% 성공 시간"으로 간주하여 한꺼번에 점수를 줍니다.
-     * 
-     * 단순화된 로직: 화면이 꺼진 시간부터 화면이 켜진 시간까지의 시간만 계산하여 포인트 지급
+     * 보안 로직을 통해 꼼수를 차단합니다.
      */
     private suspend fun calculateAccumulatedPoints() {
+        // 1. 차단 앱을 켜둔 채 화면을 끈 경우 (정산 제외)
+        if (isMiningPaused) {
+            Log.d(TAG, "차단 앱 사용 중 화면 OFF -> 정산 제외")
+            return
+        }
+
+        // 2. 오디오 꼼수 감지
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        if (audioManager.isMusicActive) {
+            Log.d(TAG, "백그라운드 오디오 재생 감지 -> 정산 제외")
+            return
+        }
+
         val startTime = preferenceManager.getLastScreenOffTime()
         val endTime = System.currentTimeMillis()
 

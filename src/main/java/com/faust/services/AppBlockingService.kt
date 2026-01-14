@@ -1,11 +1,14 @@
 package com.faust.services
 
 import android.accessibilityservice.AccessibilityService
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.provider.Settings
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -40,6 +43,9 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     
     // 페널티를 지불한 앱을 기억하는 변수 (Grace Period)
     private var lastAllowedPackage: String? = null
+    
+    // 화면 OFF 감지용 BroadcastReceiver
+    private var screenOffReceiver: BroadcastReceiver? = null
     
     // LifecycleOwner 구현
     private val lifecycleRegistry: LifecycleRegistry = LifecycleRegistry(this)
@@ -90,6 +96,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         lifecycleRegistry.currentState = Lifecycle.State.STARTED
         
         initializeBlockedAppsCache()
+        registerScreenOffReceiver()
     }
 
     override fun onDestroy() {
@@ -99,6 +106,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         serviceScope.cancel()
         hideOverlay()
         blockedAppsCache.clear()
+        unregisterScreenOffReceiver()
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
     }
 
@@ -164,24 +172,27 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
      * 
      * 역할: 감지된 패키지 이름이 데이터베이스의 blocked_apps 테이블(메모리 캐시)에 존재하는지 대조하는 이벤트입니다.
      * 트리거: TYPE_WINDOW_STATE_CHANGED 이벤트에서 패키지명이 추출된 후 발생
-     * 처리: 메모리 캐시에서 차단 여부 확인, 차단된 앱이면 4-6초 지연 후 오버레이 표시, 차단되지 않은 앱이면 오버레이 숨김
+     * 처리: 메모리 캐시에서 차단 여부 확인, 차단된 앱이면 즉시 포인트 적립 중단 및 4-6초 지연 후 오버레이 표시, 차단되지 않은 앱이면 포인트 적립 재개
      * 
      * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
      */
     private fun handleAppLaunch(packageName: String) {
-        // 페널티를 지불한 앱이면 오버레이를 띄우지 않음 (Grace Period)
-        if (packageName == lastAllowedPackage) {
-            return
-        }
-        
         // 메모리 캐시에서 차단 여부 확인
         val isBlocked = blockedAppsCache.contains(packageName)
         
         if (isBlocked) {
-            // 이전 지연 작업 취소
-            overlayDelayJob?.cancel()
+            // Step 1: 즉시 포인트 적립 중단
+            PointMiningService.pauseMining()
+            Log.d("Faust", "Mining Paused: 차단 앱 감지 ($packageName)")
             
-            // 차단된 앱 감지 - 4-6초 지연 후 오버레이 표시
+            // Step 2: Grace Period 체크 (벌금 지불 완료)
+            if (packageName == lastAllowedPackage) {
+                Log.d("Faust", "Grace Period: 오버레이 표시 안 함")
+                return
+            }
+            
+            // Step 3: 오버레이 예약 (4-6초 지연)
+            overlayDelayJob?.cancel()
             overlayDelayJob = serviceScope.launch {
                 val delay = DELAY_BEFORE_OVERLAY_MS.random()
                 delay(delay)
@@ -192,9 +203,12 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                 }
             }
         } else {
-            // 차단되지 않은 앱으로 이동하면 lastAllowedPackage 초기화하여 다시 차단 가능하게 함
+            // 허용 앱: 포인트 적립 재개
+            PointMiningService.resumeMining()
+            Log.d("Faust", "Mining Resumed: 허용 앱으로 전환")
+            
+            // Grace Period 초기화 및 오버레이 숨김
             lastAllowedPackage = null
-            // 차단되지 않은 앱이면 오버레이 숨김
             hideOverlay()
         }
     }
@@ -240,6 +254,45 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             pm.getApplicationLabel(appInfo).toString()
         } catch (e: Exception) {
             packageName
+        }
+    }
+    
+    /**
+     * 화면 OFF 감지용 BroadcastReceiver를 등록합니다.
+     */
+    private fun registerScreenOffReceiver() {
+        screenOffReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                    // PointMiningService의 상태 확인
+                    if (PointMiningService.isMiningPaused()) {
+                        Log.d("Faust", "차단 앱 사용 중 화면 OFF 감지 -> 강제 홈 이동 수행")
+                        performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+                        
+                        // 홈으로 보냈으므로 상태를 '클린'하게 초기화 (다음번 켤 때 정산 가능하도록)
+                        PointMiningService.resumeMining()
+                    }
+                }
+            }
+        }
+        
+        val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
+        registerReceiver(screenOffReceiver, filter)
+        Log.d("Faust", "Screen OFF Receiver Registered")
+    }
+    
+    /**
+     * 화면 OFF 감지용 BroadcastReceiver를 해제합니다.
+     */
+    private fun unregisterScreenOffReceiver() {
+        screenOffReceiver?.let {
+            try {
+                unregisterReceiver(it)
+                screenOffReceiver = null
+                Log.d("Faust", "Screen OFF Receiver Unregistered")
+            } catch (e: Exception) {
+                Log.e("Faust", "Error unregistering screen off receiver", e)
+            }
         }
     }
 }
