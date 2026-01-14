@@ -1,9 +1,6 @@
 package com.faust.presentation.view
 
 import android.app.Dialog
-import android.content.Context
-import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -11,76 +8,95 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.DialogFragment
+import androidx.fragment.app.viewModels
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.faust.R
+import com.faust.models.AppInfo
 import com.faust.models.BlockedApp
-import kotlinx.coroutines.Dispatchers
+import com.faust.presentation.viewmodel.AppSelectionViewModel
+import com.faust.utils.AppCategoryUtils
+import com.google.android.material.chip.ChipGroup
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class AppSelectionDialog(
     private val onAppSelected: (BlockedApp) -> Unit
 ) : DialogFragment() {
 
+    private val viewModel: AppSelectionViewModel by viewModels {
+        ViewModelProvider.AndroidViewModelFactory.getInstance(requireActivity().application)
+    }
     private lateinit var appListAdapter: InstalledAppAdapter
+    private lateinit var chipGroupCategories: ChipGroup
 
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
-        // 어댑터를 먼저 초기화
+        val view = LayoutInflater.from(requireContext())
+            .inflate(R.layout.dialog_app_selection, null)
+
+        // ChipGroup 초기화
+        chipGroupCategories = view.findViewById(R.id.chipGroupCategories)
+        setupCategoryChips()
+
+        // RecyclerView 및 어댑터 초기화
+        val recyclerView = view.findViewById<RecyclerView>(R.id.recyclerViewApps)
         appListAdapter = InstalledAppAdapter { app ->
-            onAppSelected(app)
+            onAppSelected(app.toBlockedApp())
             dismiss()
         }
+        recyclerView.layoutManager = LinearLayoutManager(requireContext())
+        recyclerView.adapter = appListAdapter
 
-        val recyclerView = RecyclerView(requireContext()).apply {
-            layoutManager = LinearLayoutManager(context)
-            adapter = appListAdapter
-        }
-
-        // 어댑터 초기화 후 앱 목록 로드
-        loadInstalledApps()
+        // ViewModel의 필터링된 앱 목록 관찰
+        observeFilteredApps()
 
         return AlertDialog.Builder(requireContext())
             .setTitle("앱 선택")
-            .setView(recyclerView)
+            .setView(view)
             .setNegativeButton("취소", null)
             .create()
     }
 
-    private fun loadInstalledApps() {
-        lifecycleScope.launch {
-            val apps = withContext(Dispatchers.IO) {
-                val pm = requireContext().packageManager
-                pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                    .filter { 
-                        // 런처 아이콘이 있는 앱만 표시 (실제 사용 가능한 앱)
-                        try {
-                            pm.getLaunchIntentForPackage(it.packageName) != null
-                        } catch (e: Exception) {
-                            false
-                        }
-                    }
-                    .map {
-                        BlockedApp(
-                            packageName = it.packageName,
-                            appName = pm.getApplicationLabel(it).toString()
-                        )
-                    }
-                    .sortedBy { it.appName } // 앱 이름순 정렬
+    /**
+     * 카테고리 칩들을 설정하고 클릭 리스너를 연결합니다.
+     */
+    private fun setupCategoryChips() {
+        chipGroupCategories.setOnCheckedStateChangeListener { group, checkedIds ->
+            val checkedChipId = checkedIds.firstOrNull() ?: return@setOnCheckedStateChangeListener
+            
+            val category = when (checkedChipId) {
+                R.id.chipAll -> AppCategoryUtils.CATEGORY_ALL
+                R.id.chipSocial -> AppCategoryUtils.CATEGORY_SOCIAL
+                R.id.chipGame -> AppCategoryUtils.CATEGORY_GAME
+                R.id.chipVideo -> AppCategoryUtils.CATEGORY_VIDEO
+                R.id.chipOther -> AppCategoryUtils.CATEGORY_OTHER
+                else -> AppCategoryUtils.CATEGORY_ALL
             }
-            appListAdapter.submitList(apps)
+            
+            viewModel.filterAppsByCategory(category)
+        }
+    }
+
+    /**
+     * ViewModel의 필터링된 앱 목록을 관찰하여 어댑터에 업데이트합니다.
+     */
+    private fun observeFilteredApps() {
+        lifecycleScope.launch {
+            viewModel.filteredApps.collect { apps ->
+                appListAdapter.submitList(apps)
+            }
         }
     }
 }
 
 class InstalledAppAdapter(
-    private val onAppClick: (BlockedApp) -> Unit
+    private val onAppClick: (AppInfo) -> Unit
 ) : RecyclerView.Adapter<InstalledAppAdapter.ViewHolder>() {
 
-    private val apps = mutableListOf<BlockedApp>()
+    private val apps = mutableListOf<AppInfo>()
 
-    fun submitList(newApps: List<BlockedApp>) {
+    fun submitList(newApps: List<AppInfo>) {
         apps.clear()
         apps.addAll(newApps)
         notifyDataSetChanged()
@@ -102,7 +118,7 @@ class InstalledAppAdapter(
         private val text1: TextView = itemView.findViewById(android.R.id.text1)
         private val text2: TextView = itemView.findViewById(android.R.id.text2)
 
-        fun bind(app: BlockedApp) {
+        fun bind(app: AppInfo) {
             text1.text = app.appName
             text2.text = app.packageName
 

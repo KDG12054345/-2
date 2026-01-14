@@ -16,8 +16,8 @@ interface PointTransactionDao {
     @Query("SELECT * FROM point_transactions ORDER BY timestamp DESC LIMIT :limit")
     fun getRecentTransactions(limit: Int): Flow<List<PointTransaction>>
 
-    @Insert
-    suspend fun insertTransaction(transaction: PointTransaction)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertTransaction(transaction: PointTransaction): Long
 
     @Query("SELECT SUM(amount) FROM point_transactions")
     suspend fun getTotalPoints(): Int?
