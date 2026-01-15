@@ -82,7 +82,8 @@ com.faust/
 │       │   ├── BlockedAppAdapter.kt                # 차단 앱 리스트 어댑터
 │       │   └── AppSelectionDialog.kt              # 앱 선택 다이얼로그
 │       └── viewmodel/
-│           └── MainViewModel.kt                  # 메인 ViewModel (MVVM)
+│           ├── MainViewModel.kt                  # 메인 ViewModel (MVVM)
+│           └── AppSelectionViewModel.kt          # 앱 선택 다이얼로그 ViewModel
 │
 ├── ⚙️ Service Layer
 │   └── services/
@@ -119,7 +120,12 @@ com.faust/
 │   └── models/
 │       ├── BlockedApp.kt                          # 차단 앱 엔티티
 │       ├── PointTransaction.kt                    # 포인트 거래 엔티티
-│       └── UserTier.kt                            # 사용자 티어 enum
+│       ├── UserTier.kt                            # 사용자 티어 enum
+│       └── AppInfo.kt                             # 앱 정보 모델 (앱 선택용)
+│
+├── 🛠️ Utils
+│   └── utils/
+│       └── AppCategoryUtils.kt                     # 앱 카테고리 분류 유틸리티
 │
 └── 🚀 Application
     └── FaustApplication.kt                        # Application 클래스
@@ -158,21 +164,39 @@ sequenceDiagram
     AppBlockingService->>AppBlockingService: 메모리 캐시에서 차단 여부 확인
     
     alt 차단된 앱인 경우
-        AppBlockingService->>AppBlockingService: 4-6초 대기
-        AppBlockingService->>GuiltyNegotiationOverlay: 오버레이 표시
-        GuiltyNegotiationOverlay->>User: 강행/철회 선택 대기
-        
-        alt 강행 선택
-            GuiltyNegotiationOverlay->>PenaltyService: 강행 페널티 적용
-            PenaltyService->>Database: 트랜잭션 시작
-            PenaltyService->>Database: 현재 포인트 조회 (SUM)
-            PenaltyService->>Database: 거래 내역 저장 (PENALTY)
-            PenaltyService->>PreferenceManager: 동기화
-            PenaltyService->>Database: 트랜잭션 커밋
-        else 철회 선택
-            GuiltyNegotiationOverlay->>PenaltyService: 철회 처리
-            PenaltyService->>Database: (Free 티어는 차감 없음)
+        AppBlockingService->>AppBlockingService: Grace Period 확인
+        alt Grace Period 활성 (lastAllowedPackage == 현재 패키지)
+            AppBlockingService->>AppBlockingService: 오버레이 표시 안 함
+        else Grace Period 비활성
+            AppBlockingService->>PointMiningService: pauseMining()
+            AppBlockingService->>AppBlockingService: 4-6초 대기
+            AppBlockingService->>GuiltyNegotiationOverlay: 오버레이 표시
+            GuiltyNegotiationOverlay->>User: 강행/철회 선택 대기
+            
+            alt 강행 선택
+                GuiltyNegotiationOverlay->>PointMiningService: applyOneTimePenalty(6 WP)
+                PointMiningService->>Database: 트랜잭션 시작
+                PointMiningService->>Database: 현재 포인트 조회 (SUM)
+                PointMiningService->>Database: 거래 내역 저장 (PENALTY, -6 WP)
+                PointMiningService->>PreferenceManager: 동기화
+                PointMiningService->>Database: 트랜잭션 커밋
+                GuiltyNegotiationOverlay->>AppBlockingService: setAllowedPackage() (Grace Period 등록)
+                AppBlockingService->>AppBlockingService: hideOverlay(shouldGoHome=false)
+            else 철회 선택
+                GuiltyNegotiationOverlay->>PenaltyService: applyQuitPenalty()
+                PenaltyService->>Database: 트랜잭션 시작
+                PenaltyService->>Database: 현재 포인트 조회 (SUM)
+                PenaltyService->>Database: 거래 내역 저장 (PENALTY, -3 WP)
+                PenaltyService->>PreferenceManager: 동기화
+                PenaltyService->>Database: 트랜잭션 커밋
+                GuiltyNegotiationOverlay->>AppBlockingService: hideOverlay(shouldGoHome=true)
+                AppBlockingService->>System: 홈 화면으로 이동
+            end
         end
+    else 차단되지 않은 앱인 경우
+        AppBlockingService->>PointMiningService: resumeMining()
+        AppBlockingService->>AppBlockingService: Grace Period 초기화 (lastAllowedPackage = null)
+        AppBlockingService->>AppBlockingService: hideOverlay(shouldGoHome=false)
     end
 ```
 
@@ -181,35 +205,51 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant PointMiningService
-    participant UsageStatsManager
+    participant System
     participant Database
     participant PreferenceManager
-    participant User
+    participant AppBlockingService
 
     PointMiningService->>PointMiningService: 백그라운드 서비스 시작
+    PointMiningService->>System: 화면 이벤트 리시버 등록
     
-    loop 매 1분마다
-        PointMiningService->>UsageStatsManager: 포그라운드 앱 조회
-        UsageStatsManager-->>PointMiningService: 현재 앱 패키지명
-        PointMiningService->>Database: 차단 목록 확인
+    alt 화면 ON 상태
+        loop 매 1분마다 (화면 ON + 채굴 일시정지 아님)
+            PointMiningService->>PointMiningService: 포인트 적립 (1 WP)
+            PointMiningService->>Database: 트랜잭션 시작
+            PointMiningService->>Database: 거래 내역 저장 (MINING)
+            PointMiningService->>Database: 현재 포인트 계산 (SUM)
+            PointMiningService->>PreferenceManager: 동기화 (호환성)
+            PointMiningService->>Database: 트랜잭션 커밋
+        end
+    else 화면 OFF 상태
+        PointMiningService->>PointMiningService: 타이머 중지
+        PointMiningService->>PointMiningService: 오디오 모니터링 시작
+        PointMiningService->>PreferenceManager: 화면 OFF 시간 저장
         
-        alt 차단되지 않은 앱인 경우
-            PointMiningService->>PreferenceManager: 마지막 채굴 시간 조회
-            PointMiningService->>PointMiningService: 경과 시간 계산
-            PointMiningService->>PointMiningService: 포인트 계산 (10분당 0.5 WP)
-            
-            alt 포인트 적립 조건 충족
-                PointMiningService->>Database: 트랜잭션 시작
-                PointMiningService->>Database: 거래 내역 저장
-                PointMiningService->>Database: 현재 포인트 계산 (SUM)
-                PointMiningService->>PreferenceManager: 동기화 (호환성)
-                PointMiningService->>Database: 트랜잭션 커밋
+        loop 10초마다
+            PointMiningService->>PointMiningService: 차단 앱 오디오 감지
+            alt 차단 앱 오디오 감지
+                PointMiningService->>PointMiningService: 채굴 일시정지
             end
         end
     end
+    
+    alt 화면 ON 복귀
+        System->>PointMiningService: ACTION_SCREEN_ON 이벤트
+        PointMiningService->>PointMiningService: 오디오 모니터링 중지
+        PointMiningService->>PointMiningService: 부재 중 포인트 일괄 계산
+        PointMiningService->>Database: 트랜잭션 시작
+        PointMiningService->>Database: 거래 내역 저장 (부재 중 보너스)
+        PointMiningService->>Database: 트랜잭션 커밋
+        PointMiningService->>PointMiningService: 타이머 재개
+    end
+    
+    Note over AppBlockingService: 차단 앱 감지 시 pauseMining() 호출
+    Note over AppBlockingService: 허용 앱으로 전환 시 resumeMining() 호출
 ```
 
-### 3. Persona 피드백 플로우
+### 3. Persona 피드백 플로우 (단순화됨)
 
 ```mermaid
 sequenceDiagram
@@ -228,13 +268,10 @@ sequenceDiagram
     
     PersonaEngine->>PersonaProvider: getPersonaProfile()
     PersonaProvider->>PreferenceManager: getPersonaTypeString()
-    PreferenceManager-->>PersonaProvider: "CALM"
+    PreferenceManager-->>PersonaProvider: "STREET" (기본값)
     PersonaProvider-->>PersonaEngine: PersonaProfile
     
-    PersonaEngine->>AudioManager: 무음 모드 확인
-    PersonaEngine->>AudioHandler: isHeadsetConnected()
-    AudioHandler-->>PersonaEngine: 연결 여부
-    
+    PersonaEngine->>AudioManager: 무음 모드 확인 (RINGER_MODE)
     PersonaEngine->>PersonaEngine: determineFeedbackMode()
     
     PersonaEngine->>VisualHandler: displayPrompt() + setupInputValidation()
@@ -245,7 +282,7 @@ sequenceDiagram
         HapticHandler->>HapticHandler: 무한 반복 진동 시작
     end
     
-    alt 피드백 모드에 오디오 포함
+    alt 피드백 모드에 오디오 포함 (소리 모드)
         PersonaEngine->>AudioHandler: playAudio()
         AudioHandler->>AudioHandler: MediaPlayer로 오디오 재생
     end
@@ -262,13 +299,6 @@ sequenceDiagram
         PersonaEngine->>AudioHandler: stop()
         HapticHandler->>HapticHandler: 진동 정지 및 리소스 해제
         AudioHandler->>AudioHandler: MediaPlayer.release()
-    end
-    
-    alt 헤드셋 탈착 감지
-        AudioManager->>GuiltyNegotiationOverlay: ACTION_AUDIO_BECOMING_NOISY
-        GuiltyNegotiationOverlay->>PersonaEngine: stopAll()
-        GuiltyNegotiationOverlay->>PersonaEngine: executeFeedback() (재실행)
-        Note over PersonaEngine: 피드백 모드 전환 (음성 → 텍스트)
     end
 ```
 
@@ -327,9 +357,22 @@ sequenceDiagram
   - `currentPoints: StateFlow<Int>` - 포인트 합계
   - `blockedApps: StateFlow<List<BlockedApp>>` - 차단 앱 목록
 - **주요 메서드**:
-  - `addBlockedApp()`: 차단 앱 추가
+  - `addBlockedApp()`: 차단 앱 추가 (티어별 최대 개수 확인)
   - `removeBlockedApp()`: 차단 앱 제거
   - `getMaxBlockedApps()`: 티어별 최대 앱 개수 반환
+  - `getCurrentBlockedAppCount()`: 현재 차단 앱 개수 반환
+
+#### AppSelectionViewModel
+- **책임**: 앱 선택 다이얼로그의 데이터 관찰 및 필터링 로직
+- **의존성**:
+  - `PackageManager` (설치된 앱 목록 조회)
+  - `AppCategoryUtils` (앱 카테고리 분류)
+- **StateFlow 관리**:
+  - `filteredApps: StateFlow<List<AppInfo>>` - 필터링된 앱 목록
+  - `selectedCategory: StateFlow<Int>` - 현재 선택된 카테고리
+- **주요 메서드**:
+  - `loadInstalledApps()`: 설치된 모든 앱 로드 (런처 아이콘이 있는 앱만)
+  - `filterAppsByCategory()`: 카테고리별 앱 필터링
 
 #### GuiltyNegotiationOverlay
 - **책임**: 시스템 오버레이로 유죄 협상 화면 표시
@@ -353,11 +396,21 @@ sequenceDiagram
 - **책임**: 
   - `TYPE_WINDOW_STATE_CHANGED` 이벤트를 통한 앱 실행 실시간 감지
   - 차단된 앱 감지 시 오버레이 트리거
+  - Grace Period 관리 (강행 선택 후 일시적 허용)
+  - 화면 OFF 시 도주 감지 및 철회 페널티 적용
 - **감지 방식**: 이벤트 기반 (Event-driven)
   - Polling 방식 제거로 배터리 효율 극대화
   - 앱 실행 즉시 감지 (실시간성 보장)
+- **Grace Period**:
+  - 사용자가 강행을 선택하면 해당 패키지를 `lastAllowedPackage`에 저장
+  - 같은 앱이 다시 실행되면 오버레이를 표시하지 않음 (일시적 허용)
+  - 다른 앱으로 전환하면 Grace Period 초기화
+- **화면 OFF 감지**:
+  - `ACTION_SCREEN_OFF` 브로드캐스트 리시버 등록
+  - 협상 중(오버레이 표시 중) 화면 OFF 감지 시 철회 페널티 자동 적용
+  - 차단 상태에서 화면 OFF 시 홈 화면으로 이동
 - **성능 최적화**:
-  - 차단된 앱 목록을 `HashSet<String>`으로 메모리 캐싱
+  - 차단된 앱 목록을 `ConcurrentHashMap.newKeySet<String>()`으로 메모리 캐싱
   - 서비스 시작 시 1회만 DB 로드
   - `getAllBlockedApps()` Flow를 구독하여 변경사항만 감지
   - 이벤트 발생 시에만 처리 (배터리 소모 최소화)
@@ -365,9 +418,25 @@ sequenceDiagram
 #### PointMiningService
 - **타입**: `LifecycleService` (Foreground Service)
 - **책임**:
-  - 차단되지 않은 앱 사용 시간 추적
-  - 포인트 자동 적립
-- **주기**: 1분마다 체크 및 포인트 계산
+  - 화면 ON 상태에서 1분마다 포인트 자동 적립 (1 WP)
+  - 화면 OFF 상태에서 오디오 모니터링 (차단 앱 감지)
+  - 화면 ON 복귀 시 부재 중 포인트 일괄 계산 (보너스)
+  - `AppBlockingService`와 연동하여 채굴 일시정지/재개
+- **화면 이벤트 처리**:
+  - `ACTION_SCREEN_ON`: 타이머 재개, 부재 중 포인트 계산
+  - `ACTION_SCREEN_OFF`: 타이머 중지, 오디오 모니터링 시작
+- **오디오 모니터링**:
+  - 화면 OFF 상태에서 10초마다 차단 앱 오디오 재생 감지
+  - `AudioManager.isMusicActive` 및 마지막 앱 정보 활용
+  - 차단 앱 오디오 감지 시 채굴 일시정지
+- **부재 중 포인트 계산**:
+  - 화면이 꺼진 시간부터 켜진 시간까지의 경과 시간(분) 계산
+  - 차단 앱 사용 중이거나 오디오 감지 시 제외
+  - 경과 시간만큼 포인트 일괄 적립 (보너스)
+- **채굴 제어**:
+  - `pauseMining()`: 외부에서 호출 가능 (차단 앱 감지 시)
+  - `resumeMining()`: 외부에서 호출 가능 (허용 앱으로 전환 시)
+  - `isMiningPaused`: 현재 일시정지 상태 확인
 - **데이터 정합성**:
   - `database.withTransaction`으로 포인트 적립과 거래 내역 저장을 원자적으로 처리
   - DB에서 현재 포인트 계산 (`PointTransactionDao.getTotalPoints()`)
@@ -379,10 +448,11 @@ sequenceDiagram
 ### 3. Business Logic Layer
 
 #### PenaltyService
-- **책임**: 페널티 계산 및 적용
+- **책임**: 페널티 계산 및 적용 (철회 시에만 사용)
 - **로직**:
-  - Free 티어: Launch 3 WP, Quit 0 WP
-  - 포인트 부족 시 0으로 클램프
+  - **강행 (Launch)**: 모든 티어 6 WP (PointMiningService.applyOneTimePenalty() 사용)
+  - **철회 (Quit)**: Free/Standard 티어 3 WP, FAUST_PRO 0 WP
+  - 포인트 부족 시 현재 포인트만큼만 차감 (0으로 클램프)
 - **데이터 정합성**:
   - `database.withTransaction`으로 포인트 차감과 거래 내역 저장을 원자적으로 처리
   - DB에서 현재 포인트 계산 (`PointTransactionDao.getTotalPoints()`)
@@ -406,23 +476,23 @@ sequenceDiagram
 
 #### PersonaEngine
 - **책임**: 기기 상태와 페르소나 프로필을 조합하여 최적의 피드백 모드를 결정하고 각 핸들러에게 실행 명령을 내립니다
-- **Safety Net 로직**:
-  - 무음 모드 + 헤드셋 없음 → `TEXT_VIBRATION`
-  - 소리 모드 + 헤드셋 있음 → `ALL`
-  - 무음 모드 + 헤드셋 있음 → `TEXT_VIBRATION`
-  - 기타 → `TEXT`
+- **Safety Net 로직** (단순화됨):
+  - **소리 모드** (RINGER_MODE_NORMAL) → `ALL` (텍스트 + 진동 + 오디오)
+  - **무음/진동 모드** (RINGER_MODE_SILENT/VIBRATE) → `TEXT_VIBRATION` (텍스트 + 진동)
+  - 헤드셋 감지 로직 제거 (시스템 무음 모드만 확인)
 - **주요 메서드**:
-  - `determineFeedbackMode()`: 기기 상태 기반 피드백 모드 결정
+  - `determineFeedbackMode()`: 기기 무음 모드 기반 피드백 모드 결정
   - `executeFeedback()`: 피드백 실행 (시각, 촉각, 청각)
   - `stopAll()`: 모든 피드백 즉시 정지 및 리소스 해제
+  - `getPersonaProfile()`: 현재 페르소나 프로필 반환
 
 #### PersonaProvider
 - **책임**: PreferenceManager에서 사용자가 선택한 페르소나 타입을 읽어와 해당하는 PersonaProfile을 제공합니다
 - **페르소나 타입**:
-  - `STREET`: 불규칙 자극 (빠른 리듬 진동)
-  - `CALM`: 부드러운 성찰 (부드러운 진동)
-  - `DIPLOMATIC`: 규칙적 압박 (규칙적 진동)
-- **기본값**: `CALM`
+  - `STREET`: 불규칙 자극 (빠른 리듬 진동, 2개의 프롬프트/오디오 중 랜덤 선택)
+  - `CALM`: 부드러운 성찰 (부드러운 진동, 오디오 없음)
+  - `DIPLOMATIC`: 규칙적 압박 (규칙적 진동, 오디오 없음)
+- **기본값**: `STREET` (PreferenceManager 기본값)
 
 #### VisualHandler
 - **책임**: 페르소나가 제시하는 문구를 화면에 표시하고 사용자 입력을 검증합니다
@@ -600,7 +670,10 @@ erDiagram
 | last_mining_app | String | null | 마지막 채굴 앱 패키지명 |
 | last_reset_time | Long | 0 | 마지막 정산 시간 |
 | is_service_running | Boolean | false | 서비스 실행 상태 |
-| persona_type | String | "CALM" | 페르소나 타입 (STREET, CALM, DIPLOMATIC) |
+| persona_type | String | "STREET" | 페르소나 타입 (STREET, CALM, DIPLOMATIC) |
+| last_screen_off_time | Long | 0 | 마지막 화면 OFF 시간 |
+| last_screen_on_time | Long | 0 | 마지막 화면 ON 시간 |
+| last_settled_time_* | Long | 0 | 앱별 마지막 정산 시점의 총 사용 시간(분) |
 
 **보안 특징**:
 - MasterKey 기반 키 관리
@@ -799,7 +872,7 @@ MainActivity
 ### 개선 가능 영역
 - 데이터베이스 인덱싱
 - 메모리 누수 방지 (Lifecycle-aware 컴포넌트)
-- PointMiningService도 이벤트 기반으로 전환 검토
+- 오디오 모니터링 정확도 향상 (현재는 추정 방식)
 
 ---
 
@@ -1093,38 +1166,35 @@ WeeklyResetReceiver.onReceive()
 
 **처리 로직**:
 - 메모리 캐시(`blockedAppsCache`)에서 차단 여부 확인
-- 차단된 앱인 경우: 4-6초 지연 후 오버레이 표시
-- 차단되지 않은 앱인 경우: 오버레이 숨김
+- **Grace Period 확인**: `lastAllowedPackage == 현재 패키지`인 경우 오버레이 표시 안 함
+- 차단된 앱인 경우:
+  - `PointMiningService.pauseMining()` 호출
+  - 4-6초 지연 후 오버레이 표시
+- 차단되지 않은 앱인 경우:
+  - `PointMiningService.resumeMining()` 호출
+  - Grace Period 초기화 (`lastAllowedPackage = null`)
+  - 오버레이 숨김
 
 **관련 컴포넌트**:
-- `AppBlockingService`: 차단 여부 판단
-- `blockedAppsCache`: 메모리 캐시 (HashSet)
+- `AppBlockingService`: 차단 여부 판단 및 Grace Period 관리
+- `blockedAppsCache`: 메모리 캐시 (ConcurrentHashMap.newKeySet)
+- `PointMiningService`: 채굴 일시정지/재개
 
 #### 3. showOverlay (오버레이 노출)
 
 **위치**: [`AppBlockingService.showOverlay()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
 
-**발생 조건**: `TYPE_WINDOW_STATE_CHANGED` 이벤트에서 패키지명이 추출된 후 발생합니다.
-
-**처리 로직**:
-- 메모리 캐시(`blockedAppsCache`)에서 차단 여부 확인
-- 차단된 앱인 경우: 4-6초 지연 후 오버레이 표시
-- 차단되지 않은 앱인 경우: 오버레이 숨김
-
-**관련 컴포넌트**:
-- `AppBlockingService`: 차단 여부 판단
-- `blockedAppsCache`: 메모리 캐시 (HashSet)
-
-**발생 조건**: 차단 대상 앱임이 확인되고 4-6초 지연 시간이 경과한 후 발생합니다.
+**발생 조건**: 차단 대상 앱임이 확인되고 Grace Period가 비활성이며 4-6초 지연 시간이 경과한 후 발생합니다.
 
 **처리 로직**:
 - `GuiltyNegotiationOverlay` 인스턴스 생성
 - `WindowManager`를 통해 시스템 레벨 오버레이 표시
 - 30초 카운트다운 시작
+- Persona 피드백 실행
 
 **관련 컴포넌트**:
 - `AppBlockingService`: 오버레이 트리거
-- `GuiltyNegotiationOverlay`: 오버레이 UI 표시
+- `GuiltyNegotiationOverlay`: 오버레이 UI 표시 및 Persona 피드백
 - `WindowManager`: 시스템 레벨 오버레이 관리
 
 ### B. 포인트 및 페널티 이벤트 (Point & Penalty Events)
@@ -1133,16 +1203,18 @@ WeeklyResetReceiver.onReceive()
 
 **위치**: [`GuiltyNegotiationOverlay.onProceed()`](app/src/main/java/com/faust/presentation/view/GuiltyNegotiationOverlay.kt)
 
-**발생 조건**: 사용자가 오버레이에서 '강행' 버튼을 선택할 때 발생합니다.
+**발생 조건**: 사용자가 오버레이에서 '강행' 버튼을 선택할 때 발생합니다. (입력 검증 통과 후 활성화)
 
 **처리 로직**:
-- `PenaltyService.applyLaunchPenalty()` 호출
+- `PointMiningService.applyOneTimePenalty(context, 6)` 호출
 - 모든 티어: 6 WP 차감
-- 오버레이 닫기
+- `AppBlockingService.setAllowedPackage()` 호출 (Grace Period 등록)
+- `AppBlockingService.hideOverlay(shouldGoHome=false)` 호출 (오버레이만 닫고 앱 계속 사용)
 
 **관련 컴포넌트**:
 - `GuiltyNegotiationOverlay`: 사용자 인터랙션 처리
-- `PenaltyService`: 페널티 계산 및 적용
+- `PointMiningService`: 페널티 적용 (트랜잭션)
+- `AppBlockingService`: Grace Period 관리 및 오버레이 제어
 - `FaustDatabase`: 포인트 차감 (트랜잭션)
 
 #### 2. onCancel (철회)
@@ -1153,14 +1225,14 @@ WeeklyResetReceiver.onReceive()
 
 **처리 로직**:
 - `PenaltyService.applyQuitPenalty()` 호출
-- Free 티어: 3 WP 차감 후 홈 복귀
-- Standard 티어: 3 WP 차감 후 홈 복귀
-- FAUST_PRO: 추후 변경 예정
-- 오버레이 닫기
+- Free/Standard 티어: 3 WP 차감
+- FAUST_PRO: 0 WP (차감 없음)
+- `AppBlockingService.hideOverlay(shouldGoHome=true)` 호출 (홈 화면으로 강제 이동)
 
 **관련 컴포넌트**:
 - `GuiltyNegotiationOverlay`: 사용자 인터랙션 처리
 - `PenaltyService`: 페널티 계산 및 적용
+- `AppBlockingService`: 홈 화면 이동 및 오버레이 제어
 
 #### 3. executePersonaFeedback (Persona 피드백 실행)
 
@@ -1202,23 +1274,97 @@ WeeklyResetReceiver.onReceive()
 
 #### 5. processMining (포인트 채굴)
 
-**위치**: [`PointMiningService.processMining()`](app/src/main/java/com/faust/services/PointMiningService.kt)
+**위치**: [`PointMiningService.startMiningJob()`](app/src/main/java/com/faust/services/PointMiningService.kt)
 
-**발생 조건**: `PointMiningService`에서 1분마다 실행되며, 현재 사용 중인 앱이 차단 목록에 없을 경우 발생합니다.
+**발생 조건**: `PointMiningService`에서 화면이 켜져 있고 채굴이 일시정지되지 않았을 때 1분마다 실행됩니다.
 
 **처리 로직**:
-- 포그라운드 앱 확인
-- 차단 목록 확인 (차단된 앱이면 중지)
-- 같은 앱 사용 시간 계산
-- 10분당 1 WP 기준으로 포인트 계산 (Free 티어는 0.5x)
+- 화면 ON 상태 확인 (`isScreenOn`)
+- 채굴 일시정지 상태 확인 (`isMiningPaused`)
+- 조건 충족 시 1 WP 적립
 - 포인트 적립 (트랜잭션 보장)
 
 **관련 컴포넌트**:
 - `PointMiningService`: 채굴 로직 실행
-- `UsageStatsManager`: 포그라운드 앱 조회
+- `AppBlockingService`: `pauseMining()` / `resumeMining()` 호출
 - `FaustDatabase`: 포인트 적립 (트랜잭션)
 
-### C. 데이터 동기화 이벤트 (Data Synchronization Events)
+#### 6. calculateAccumulatedPoints (부재 중 포인트 계산)
+
+**위치**: [`PointMiningService.calculateAccumulatedPoints()`](app/src/main/java/com/faust/services/PointMiningService.kt)
+
+**발생 조건**: 화면이 OFF 상태에서 ON 상태로 전환될 때 (`ACTION_SCREEN_ON` 이벤트) 실행됩니다.
+
+**처리 로직**:
+- 차단 앱 사용 중이면 제외
+- 차단 앱 오디오 감지 시 제외
+- 화면 OFF 시간부터 ON 시간까지의 경과 시간(분) 계산
+- 경과 시간만큼 포인트 일괄 적립 (보너스)
+- 화면 ON 시간 저장
+
+**관련 컴포넌트**:
+- `PointMiningService`: 부재 중 포인트 계산
+- `PreferenceManager`: 화면 이벤트 시간 저장/조회
+- `FaustDatabase`: 포인트 적립 (트랜잭션)
+
+#### 7. handleScreenOff (화면 OFF 감지)
+
+**위치**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+
+**발생 조건**: `ACTION_SCREEN_OFF` 브로드캐스트가 발생할 때 실행됩니다.
+
+**처리 로직**:
+- **Case 1**: 협상 중(오버레이 표시 중) 화면 OFF → 도주 감지
+  - 철회 페널티 자동 적용 (`PenaltyService.applyQuitPenalty()`)
+  - 오버레이 닫기 및 홈 화면으로 이동
+  - 채굴 재개
+- **Case 2**: 차단 상태(오버레이 없음)에서 화면 OFF → 홈 화면으로 이동
+  - 채굴 재개
+
+**관련 컴포넌트**:
+- `AppBlockingService`: 화면 OFF 이벤트 처리
+- `PenaltyService`: 철회 페널티 적용
+- `PointMiningService`: 채굴 재개
+
+### C. 화면 이벤트 처리 (Screen Event Handling)
+
+#### 1. ACTION_SCREEN_ON (화면 켜짐)
+
+**위치**: [`PointMiningService.registerScreenEventReceiver()`](app/src/main/java/com/faust/services/PointMiningService.kt)
+
+**발생 조건**: 사용자가 기기 화면을 켤 때 시스템이 브로드캐스트를 전송합니다.
+
+**처리 로직**:
+- 오디오 모니터링 중지
+- 부재 중 포인트 일괄 계산 (`calculateAccumulatedPoints()`)
+- 타이머 재개 (`startMiningJob()`)
+
+**관련 컴포넌트**:
+- `PointMiningService`: 화면 ON 이벤트 처리
+- `PreferenceManager`: 화면 이벤트 시간 저장
+
+#### 2. ACTION_SCREEN_OFF (화면 꺼짐)
+
+**위치**: 
+- [`PointMiningService.registerScreenEventReceiver()`](app/src/main/java/com/faust/services/PointMiningService.kt)
+- [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+
+**발생 조건**: 사용자가 기기 화면을 끌 때 시스템이 브로드캐스트를 전송합니다.
+
+**처리 로직**:
+- **PointMiningService**:
+  - 타이머 중지
+  - 화면 OFF 시간 저장
+  - 오디오 모니터링 시작 (`startAudioMonitoring()`)
+- **AppBlockingService**:
+  - 협상 중 도주 감지 및 철회 페널티 적용
+  - 차단 상태에서 홈 화면으로 이동
+
+**관련 컴포넌트**:
+- `PointMiningService`: 타이머 중지 및 오디오 모니터링
+- `AppBlockingService`: 도주 감지 및 페널티 적용
+
+### D. 데이터 동기화 이벤트 (Data Synchronization Events)
 
 #### 1. getTotalPointsFlow (UI 업데이트)
 
@@ -1270,7 +1416,24 @@ WeeklyResetReceiver.onReceive()
 **관련 컴포넌트**:
 - `AppBlockingService`: 캐시 관리
 - `AppBlockDao`: 차단 앱 목록 제공 (Flow)
-- `blockedAppsCache`: 메모리 캐시 (HashSet)
+- `blockedAppsCache`: 메모리 캐시 (ConcurrentHashMap.newKeySet)
+
+#### 4. Grace Period (일시적 허용)
+
+**위치**: [`AppBlockingService.setAllowedPackage()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+
+**발생 조건**: 사용자가 오버레이에서 '강행' 버튼을 선택할 때 발생합니다.
+
+**처리 로직**:
+- `setAllowedPackage(packageName)` 호출로 `lastAllowedPackage`에 현재 패키지 저장
+- 같은 앱이 다시 실행되면 오버레이를 표시하지 않음 (일시적 허용)
+- 다른 앱으로 전환하면 `lastAllowedPackage = null`로 초기화
+
+**목적**: 사용자가 페널티를 지불하고 강행을 선택한 경우, 같은 앱에 대해 즉시 다시 오버레이를 표시하지 않아 사용성을 개선합니다.
+
+**관련 컴포넌트**:
+- `AppBlockingService`: Grace Period 관리
+- `GuiltyNegotiationOverlay`: 강행 선택 시 Grace Period 등록
 
 ---
 

@@ -34,12 +34,7 @@ import kotlinx.coroutines.*
 
 /**
  * [핵심 이벤트: 차단 관련 이벤트 - showOverlay]
- * 
- * 역할: 차단 대상 앱임이 확인되면 4~6초의 지연 후 화면 최상단에 표시되는 오버레이입니다.
- * 트리거: AppBlockingService.showOverlay() 호출
- * 처리: WindowManager를 통해 시스템 레벨 오버레이 표시, 30초 카운트다운 시작, 강행/철회 버튼 제공
- * 
- * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
+ * * 역할: 차단 대상 앱임이 확인되면 화면 최상단에 표시되는 오버레이입니다.
  */
 class GuiltyNegotiationOverlay(
     private val context: Context
@@ -52,8 +47,8 @@ class GuiltyNegotiationOverlay(
     private var packageName: String = ""
     private var appName: String = ""
     private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var isUserActionCompleted: Boolean = false // 사용자 액션 완료 여부
-    
+    private var isUserActionCompleted: Boolean = false
+
     // Persona Module
     private val personaEngine: PersonaEngine by lazy {
         val preferenceManager = PreferenceManager(context)
@@ -61,7 +56,7 @@ class GuiltyNegotiationOverlay(
         val visualHandler: VisualHandler = VisualHandlerImpl()
         val hapticHandler: HapticHandler = HapticHandlerImpl(context)
         val audioHandler: AudioHandler = AudioHandlerImpl(context)
-        
+
         PersonaEngine(
             personaProvider = personaProvider,
             visualHandler = visualHandler,
@@ -70,7 +65,7 @@ class GuiltyNegotiationOverlay(
             context = context
         )
     }
-    
+
     private var headsetReceiver: BroadcastReceiver? = null
 
     companion object {
@@ -84,43 +79,19 @@ class GuiltyNegotiationOverlay(
     override val lifecycle: Lifecycle
         get() = lifecycleRegistry
 
-    /**
-     * [핵심 이벤트: 차단 관련 이벤트 - showOverlay]
-     * 
-     * 역할: 오버레이를 화면에 표시합니다.
-     * 트리거: AppBlockingService.showOverlay() 호출
-     * 처리: WindowManager를 통해 시스템 레벨 오버레이 추가, 30초 카운트다운 시작
-     */
     fun show(packageName: String, appName: String) {
         this.packageName = packageName
         this.appName = appName
-        isUserActionCompleted = false // 사용자 액션 플래그 초기화
+        isUserActionCompleted = false
 
-        if (overlayView != null) {
-            Log.d(TAG, "Overlay already showing, skipping")
-            return // 이미 표시 중
-        }
+        if (overlayView != null) return
 
-        // 오버레이 권한 확인 (BadTokenException 방지)
-        val hasPermission = checkOverlayPermission()
-        Log.d(TAG, "Overlay permission check: $hasPermission")
-        
-        if (!hasPermission) {
-            Log.w(TAG, "Overlay permission not granted, cannot show overlay")
-            Log.w(TAG, "Settings.canDrawOverlays(context) = ${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(context) else "N/A (API < 23)"}")
-            return
-        }
+        if (!checkOverlayPermission()) return
 
-        // 권한이 있는 경우 즉시 오버레이 표시 시도
-        Log.d(TAG, "Overlay permission granted, attempting to show overlay")
         lifecycleRegistry.currentState = Lifecycle.State.CREATED
         lifecycleRegistry.currentState = Lifecycle.State.STARTED
 
-        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
-            ?: run {
-                Log.e(TAG, "WindowManager service not available")
-                return
-            }
+        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return
         this.windowManager = windowManager
 
         overlayView = createOverlayView()
@@ -128,85 +99,52 @@ class GuiltyNegotiationOverlay(
             val params = createWindowParams()
             try {
                 windowManager.addView(view, params)
-                Log.d(TAG, "Overlay view added successfully")
-                
-                // Persona 피드백 실행
+
+                // Persona 피드백
                 val textPrompt = view.findViewById<TextView>(R.id.textPrompt)
                 val editInput = view.findViewById<EditText>(R.id.editInput)
                 val proceedButton = view.findViewById<Button>(R.id.buttonProceed)
-                
-                // 키보드 강제 표시
+
                 view.post {
                     editInput.requestFocus()
-                    
                     val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
                     imm.showSoftInput(editInput, InputMethodManager.SHOW_IMPLICIT)
-                    
-                    Log.d(TAG, "Keyboard shown via showSoftInput")
                 }
-                
+
                 coroutineScope.launch {
                     val profile = personaEngine.getPersonaProfile()
                     personaEngine.executeFeedback(profile, textPrompt, editInput, proceedButton)
                 }
-                
-                // 헤드셋 리스너 등록
+
                 registerHeadsetReceiver()
-                
                 startCountdown()
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to add overlay view", e)
-                Log.e(TAG, "Exception type: ${e.javaClass.simpleName}, message: ${e.message}")
-                // 오버레이 추가 실패
                 overlayView = null
             }
-        } ?: run {
-            Log.e(TAG, "Failed to create overlay view")
         }
     }
 
-    /**
-     * 오버레이 권한이 있는지 확인합니다.
-     * BadTokenException 방지를 위해 필수입니다.
-     */
     private fun checkOverlayPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val hasPermission = Settings.canDrawOverlays(context)
-            Log.d(TAG, "checkOverlayPermission: SDK >= M, result = $hasPermission")
-            hasPermission
+            Settings.canDrawOverlays(context)
         } else {
-            Log.d(TAG, "checkOverlayPermission: SDK < M, returning true")
             true
         }
     }
 
-    /**
-     * 오버레이를 닫습니다.
-     * 사용자가 버튼을 누르기 전까지는 호출되지 않도록 보호됩니다.
-     * @param force 강제로 닫을지 여부 (기본값: false, 사용자 액션으로만 닫을 수 있음)
-     */
     fun dismiss(force: Boolean = false) {
-        // 사용자 액션이 완료되지 않았고 강제가 아니면 닫지 않음
-        if (!isUserActionCompleted && !force) {
-            Log.w(TAG, "dismiss() called but user action not completed. Ignoring dismiss request.")
-            Log.w(TAG, "Overlay can only be dismissed after user clicks proceed or cancel button.")
-            return
-        }
-        
-        Log.d(TAG, "Dismissing overlay (force=$force, userActionCompleted=$isUserActionCompleted)")
-        
-        // Persona 피드백 정지 (가장 중요!)
+        if (!isUserActionCompleted && !force) return
+
+        Log.d(TAG, "Dismissing overlay (force=$force)")
+
         personaEngine.stopAll()
-        
-        // 헤드셋 리스너 해제
         unregisterHeadsetReceiver()
-        
         countdownJob?.cancel()
         coroutineScope.cancel()
+
         overlayView?.let { view ->
             try {
                 windowManager?.removeView(view)
-                Log.d(TAG, "Overlay view removed successfully")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to remove overlay view", e)
             }
@@ -230,51 +168,31 @@ class GuiltyNegotiationOverlay(
         titleText.text = context.getString(R.string.guilty_negotiation_title)
         messageText.text = context.getString(R.string.guilty_negotiation_message)
 
-        // ✅ 강행 버튼: 강력한 터치 리스너로 Magnifier/커서 드래그 차단
         proceedButton.setOnTouchListener { v, event ->
             when (event.action) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    // 핵심: 누르는 순간 true를 반환해 "내가 처리함" 선언 -> 돋보기/커서 이동 차단
-                    true
-                }
-                android.view.MotionEvent.ACTION_UP -> {
-                    // 손을 뗐을 때 클릭 동작 수행
-                    v.performClick() // 접근성 위해 유지
-                    
-                    // 강행 버튼 로직 실행
-                    Log.d(TAG, "강행 버튼 클릭됨 (Magnifier 차단 성공)")
+                MotionEvent.ACTION_DOWN -> true
+                MotionEvent.ACTION_UP -> {
+                    v.performClick()
                     onProceed()
-                    
                     true
                 }
                 else -> false
             }
         }
 
-        // ✅ 취소 버튼: 강력한 터치 리스너로 Magnifier/커서 드래그 차단
         cancelButton.setOnTouchListener { v, event ->
             when (event.action) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    // 핵심: 누르는 순간 true를 반환해 "내가 처리함" 선언 -> 돋보기/커서 이동 차단
-                    true
-                }
-                android.view.MotionEvent.ACTION_UP -> {
-                    // 손을 뗐을 때 클릭 동작 수행
-                    v.performClick() // 접근성 위해 유지
-                    
-                    // 취소 버튼 로직 실행
-                    Log.d(TAG, "취소 버튼 클릭됨 (Magnifier 차단 성공)")
+                MotionEvent.ACTION_DOWN -> true
+                MotionEvent.ACTION_UP -> {
+                    v.performClick()
                     onCancel()
-                    
                     true
                 }
                 else -> false
             }
         }
 
-        // 30초 카운트다운 시작
         startCountdown(countdownText)
-
         return view
     }
 
@@ -291,62 +209,50 @@ class GuiltyNegotiationOverlay(
             }
 
             if (isActive && remainingSeconds == 0) {
-                // 30초 경과 후에도 버튼 활성화
                 textView?.text = context.getString(R.string.wait_time, 0)
             }
         }
     }
 
     /**
-     * [핵심 이벤트: 포인트 및 페널티 이벤트 - onProceed]
-     * 
-     * 역할: 사용자가 오버레이에서 '강행'을 선택할 때 발생하며, PointMiningService를 통해 일회성 벌금을 부과하고 오버레이를 닫습니다.
-     * 트리거: 사용자가 오버레이의 '강행' 버튼 클릭
-     * 처리: PointMiningService.applyOneTimePenalty() 호출 (벌금 액수: 6 WP), 오버레이 닫기
-     * 
-     * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
+     * [핵심 수정] 강행 처리
+     * 서비스를 통해 종료 요청을 보내 중복 차감을 방지합니다.
      */
     private fun onProceed() {
         Log.d(TAG, "User clicked proceed button")
+
         personaEngine.stopAll()
         isUserActionCompleted = true
 
+        // 허용 패키지 등록
         (context as? AppBlockingService)?.setAllowedPackage(packageName)
 
-        val penaltyAmount = 6
-        Log.w(TAG, "강행 버튼 클릭: ${penaltyAmount} WP 차감 예정")
-        PointMiningService.applyOneTimePenalty(context, penaltyAmount)
+        // 벌금 6 WP 부과
+        Log.w(TAG, "강행 버튼 클릭: 6 WP 차감")
+        PointMiningService.applyOneTimePenalty(context, 6)
 
-        // 수정: 직접 dismiss() 하지 말고 서비스를 통해 닫아서 참조를 제거합니다.
-        (context as? AppBlockingService)?.hideOverlay()
+        // [핵심] 서비스에게 오버레이 닫기 요청 (홈 이동 X)
+        // shouldGoHome = false -> 오버레이만 닫고 앱 계속 사용
+        (context as? AppBlockingService)?.hideOverlay(shouldGoHome = false)
     }
 
     /**
-     * [핵심 이벤트: 포인트 및 페널티 이벤트 - onCancel]
-     * 
-     * 역할: 사용자가 '철회'를 선택할 때 발생하며, 오버레이를 닫고 해당 앱 사용을 중단하도록 유도합니다.
-     * 트리거: 사용자가 오버레이의 '철회' 버튼 클릭
-     * 처리: PenaltyService.applyQuitPenalty() 호출 (Free 티어: 3 WP 차감, Standard 티어: 3 WP 차감, 즉시 완료 대기), 홈 화면으로 이동, 오버레이 닫기
-     * 
-     * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
+     * [핵심 수정] 철회 처리
+     * 서비스를 통해 확실하게 홈 화면으로 이동합니다.
      */
     private fun onCancel() {
         Log.d(TAG, "User clicked cancel button")
+
         personaEngine.stopAll()
         isUserActionCompleted = true
 
-        Log.w(TAG, "철회 버튼 클릭: 포인트 차감 예정")
         coroutineScope.launch {
+            // 페널티 적용
             penaltyService.applyQuitPenalty(packageName, appName)
 
-            val intent = Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_HOME)
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            context.startActivity(intent)
-
-            // 수정: 직접 View를 제거하지 말고 서비스를 통해 전체 정리를 수행합니다.
-            (context as? AppBlockingService)?.hideOverlay()
+            // [핵심] 서비스에게 오버레이 닫기 및 홈 이동 요청
+            // shouldGoHome = true -> 강제로 홈으로 튕겨냄
+            (context as? AppBlockingService)?.hideOverlay(shouldGoHome = true)
         }
     }
 
@@ -362,32 +268,23 @@ class GuiltyNegotiationOverlay(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             type,
-            // [핵심] 플래그를 최소화하여 충돌 방지
-            // FLAG_NOT_FOCUSABLE 절대 금지
             WindowManager.LayoutParams.FLAG_DIM_BEHIND or
-                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or // 바깥 터치 감지 (선택 사항)
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or     // 잠금 화면 위 표시
-                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,  // 하드웨어 가속 활성화
+                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.CENTER
             dimAmount = 0.5f
-            // 키보드 표시를 위한 softInputMode 설정
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         }
     }
-    
-    /**
-     * 헤드셋 연결/해제를 감지하는 BroadcastReceiver를 등록합니다.
-     * 오버레이가 표시되는 동안에만 활성화됩니다 (한시적 리스너).
-     */
+
     private fun registerHeadsetReceiver() {
         try {
             headsetReceiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context?, intent: Intent?) {
                     if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
-                        Log.d(TAG, "Headset disconnected, switching feedback mode")
-                        // 이어폰 탈착 시 피드백 모드 전환
                         coroutineScope.launch {
                             personaEngine.stopAll()
                             overlayView?.let { view ->
@@ -401,24 +298,18 @@ class GuiltyNegotiationOverlay(
                     }
                 }
             }
-            
             val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
             context.registerReceiver(headsetReceiver, filter)
-            Log.d(TAG, "Headset receiver registered")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to register headset receiver", e)
         }
     }
-    
-    /**
-     * 헤드셋 리스너를 해제합니다.
-     */
+
     private fun unregisterHeadsetReceiver() {
         try {
             headsetReceiver?.let {
                 context.unregisterReceiver(it)
                 headsetReceiver = null
-                Log.d(TAG, "Headset receiver unregistered")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to unregister headset receiver", e)
