@@ -56,7 +56,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _currentPoints.value = 0
                 }
                 .collect { points ->
-                    _currentPoints.value = points
+                    // 포인트는 항상 0 이상으로 보장
+                    _currentPoints.value = points.coerceAtLeast(0)
                 }
         }
     }

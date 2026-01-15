@@ -93,28 +93,33 @@ class PenaltyService(private val context: Context) {
         try {
             database.withTransaction {
                 try {
-                    // 현재 포인트 조회 (DB에서 계산)
-                    val currentPoints = database.pointTransactionDao().getTotalPoints() ?: 0
+                    // 현재 포인트 조회 (DB에서 계산, 0 이상 보장)
+                    val currentPoints = (database.pointTransactionDao().getTotalPoints() ?: 0).coerceAtLeast(0)
+                    
+                    // 포인트가 0 미만이 되지 않도록 패널티 제한
+                    // 예: 현재 포인트 1, 요청 패널티 6 → 실제 차감 1, 결과 포인트 0
+                    // 예: 현재 포인트 4, 요청 패널티 6 → 실제 차감 4, 결과 포인트 0
                     val actualPenalty = penalty.coerceAtMost(currentPoints)
-
-                    if (actualPenalty > 0) {
-                        // 거래 내역 저장 (트랜잭션으로 원자적 처리)
-                        database.pointTransactionDao().insertTransaction(
-                            com.faust.models.PointTransaction(
-                                amount = -actualPenalty,
-                                type = TransactionType.PENALTY,
-                                reason = reason
-                            )
-                        )
-                        
-                        // PreferenceManager 동기화 (호환성 유지)
-                        val newPoints = (currentPoints - actualPenalty).coerceAtLeast(0)
-                        preferenceManager.setCurrentPoints(newPoints)
-                        
-                        Log.w(TAG, "포인트 차감 완료: ${actualPenalty} WP 차감 (기존: ${currentPoints} WP → 현재: ${newPoints} WP), 사유: $reason")
-                    } else {
-                        Log.w(TAG, "포인트 차감 실패: 현재 포인트(${currentPoints} WP)가 부족하여 차감 불가, 요청된 페널티: ${penalty} WP")
+                    
+                    if (actualPenalty <= 0) {
+                        Log.d(TAG, "포인트 부족으로 패널티 적용 불가: 요청 ${penalty} WP, 현재 ${currentPoints} WP")
+                        return@withTransaction
                     }
+                    
+                    database.pointTransactionDao().insertTransaction(
+                        com.faust.models.PointTransaction(
+                            amount = -actualPenalty,  // 음수로 저장
+                            type = TransactionType.PENALTY,
+                            reason = reason
+                        )
+                    )
+                    
+                    // PreferenceManager 동기화: 포인트는 항상 0 이상
+                    // actualPenalty는 이미 currentPoints로 제한되었으므로 newPoints는 항상 0 이상
+                    val newPoints = (currentPoints - actualPenalty).coerceAtLeast(0)
+                    preferenceManager.setCurrentPoints(newPoints)
+                    
+                    Log.w(TAG, "포인트 차감 완료: ${actualPenalty} WP 차감 (기존: ${currentPoints} WP → 현재: ${newPoints} WP), 사유: $reason")
                 } catch (e: Exception) {
                     Log.e(TAG, "Error applying penalty in transaction: penalty=$penalty, reason=$reason", e)
                     throw e // 트랜잭션 롤백을 위해 예외 재발생

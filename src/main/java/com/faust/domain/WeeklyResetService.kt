@@ -259,8 +259,8 @@ object WeeklyResetService {
 
                 database.withTransaction {
                     try {
-                        // 현재 포인트 조회 (DB에서 계산)
-                        val currentPoints = database.pointTransactionDao().getTotalPoints() ?: 0
+                        // 현재 포인트 조회 (DB에서 계산, 0 이상 보장)
+                        val currentPoints = (database.pointTransactionDao().getTotalPoints() ?: 0).coerceAtLeast(0)
 
                         if (currentPoints > RESET_THRESHOLD) {
                             // 100 WP를 제외한 모든 포인트 몰수
