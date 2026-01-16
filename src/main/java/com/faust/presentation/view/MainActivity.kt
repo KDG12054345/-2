@@ -109,7 +109,7 @@ class MainActivity : AppCompatActivity() {
         checkPermissions()
         observeViewModel()
         
-        // 주간 정산 스케줄링 (권한 에러로 한 번 죽었다면 다시 시도하지 않음)
+        // 주간 정산 스케줄링
         if (!hasAlarmPermissionError()) {
             try {
                 WeeklyResetService.scheduleWeeklyReset(this)

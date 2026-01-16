@@ -36,6 +36,8 @@ class PreferenceManager(context: Context) {
         private const val KEY_PERSONA_TYPE = "persona_type"
         private const val KEY_LAST_SCREEN_OFF_TIME = "last_screen_off_time"
         private const val KEY_LAST_SCREEN_ON_TIME = "last_screen_on_time"
+        private const val KEY_TEST_MODE_MAX_APPS = "test_mode_max_apps"
+        private const val KEY_AUDIO_BLOCKED_ON_SCREEN_OFF = "audio_blocked_on_screen_off"
 
         /**
          * EncryptedSharedPreferences 인스턴스를 생성합니다.
@@ -226,6 +228,32 @@ class PreferenceManager(context: Context) {
         }
     }
 
+    // Audio Blocked State on Screen Off
+    /**
+     * 화면 OFF 시 차단 앱에서 오디오가 재생 중이었는지 조회합니다.
+     * @return 화면 OFF 시 차단 앱 오디오 재생 중이었으면 true
+     */
+    fun wasAudioBlockedOnScreenOff(): Boolean {
+        return try {
+            prefs.getBoolean(KEY_AUDIO_BLOCKED_ON_SCREEN_OFF, false)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get audio blocked on screen off state", e)
+            false
+        }
+    }
+
+    /**
+     * 화면 OFF 시 차단 앱에서 오디오가 재생 중이었는지 저장합니다.
+     * @param wasBlocked 화면 OFF 시 차단 앱 오디오 재생 중이었으면 true
+     */
+    fun setAudioBlockedOnScreenOff(wasBlocked: Boolean) {
+        try {
+            prefs.edit().putBoolean(KEY_AUDIO_BLOCKED_ON_SCREEN_OFF, wasBlocked).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set audio blocked on screen off state", e)
+        }
+    }
+
     // App-specific Last Settled Time (for preventing duplicate point calculation)
     /**
      * 앱별로 마지막 정산 시점의 총 사용 시간(분)을 조회합니다.
@@ -253,6 +281,37 @@ class PreferenceManager(context: Context) {
             prefs.edit().putLong(key, timeInMinutes).apply()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set last settled time for $packageName", e)
+        }
+    }
+
+    // Test Mode (for testing on real device)
+    /**
+     * 테스트 모드 최대 차단 앱 개수를 조회합니다.
+     * @return 테스트 모드 최대 앱 개수, 설정되지 않았거나 비활성화된 경우 null 반환
+     */
+    fun getTestModeMaxApps(): Int? {
+        return try {
+            val value = prefs.getInt(KEY_TEST_MODE_MAX_APPS, -1)
+            if (value > 0) value else null
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get test mode max apps", e)
+            null
+        }
+    }
+
+    /**
+     * 테스트 모드 최대 차단 앱 개수를 설정합니다.
+     * @param maxApps 최대 앱 개수 (null이면 테스트 모드 비활성화)
+     */
+    fun setTestModeMaxApps(maxApps: Int?) {
+        try {
+            if (maxApps != null && maxApps > 0) {
+                prefs.edit().putInt(KEY_TEST_MODE_MAX_APPS, maxApps).apply()
+            } else {
+                prefs.edit().putInt(KEY_TEST_MODE_MAX_APPS, -1).apply() // -1로 설정하여 비활성화
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set test mode max apps", e)
         }
     }
 
