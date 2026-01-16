@@ -65,6 +65,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     private var lastHomeNavigationTime: Long = 0L
     private val COOLDOWN_DURATION_MS = 1000L // 1초
     private val DELAY_AFTER_OVERLAY_DISMISS_MS = 150L // 오버레이 닫은 후 홈 이동 지연 시간
+    private val DELAY_AFTER_PERSONA_AUDIO_STOP_MS = 150L // PersonaEngine 오디오 정지 완료 대기 시간 (오디오 콜백 지연 고려)
 
     // 중복 호출 방지 메커니즘 (handleAppLaunch 중복 호출 방지)
     @Volatile
@@ -260,24 +261,28 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             val blockedPackageForCoolDown = currentBlockedPackage
 
             // 3. 오버레이 닫기 및 참조 제거 (중복 차감 방지 핵심)
-            currentOverlay?.dismiss(force = true)
+            currentOverlay?.dismiss(force = true)  // personaEngine.stopAll() 호출
             currentOverlay = null
 
             // 4. 앱 정보 초기화
             currentBlockedPackage = null
             currentBlockedAppName = null
 
-            // 5. 오버레이 표시 상태 해제
-            isOverlayActive = false
-            Log.d(TAG, "오버레이 표시 상태 해제: false")
+            // 5. PersonaEngine 오디오 정지 완료 대기 (오디오 콜백 지연 고려)
+            // MediaPlayer 정지 및 시스템 오디오 콜백 지연을 고려한 안전 지연
+            delay(DELAY_AFTER_PERSONA_AUDIO_STOP_MS)
 
-            // 6. 홈 이동 요청이 있으면 지연 후 실행 (영상 재생 중 화면 축소 방지)
+            // 6. 오버레이 표시 상태 해제 (PersonaEngine 오디오 정지 완료 후)
+            isOverlayActive = false
+            Log.d(TAG, "오버레이 표시 상태 해제: false (PersonaEngine 오디오 정지 완료 후)")
+
+            // 7. 홈 이동 요청이 있으면 지연 후 실행 (영상 재생 중 화면 축소 방지)
             if (shouldGoHome) {
                 delay(DELAY_AFTER_OVERLAY_DISMISS_MS)
                 navigateToHome("오버레이 종료 요청", blockedPackageForCoolDown)
             }
 
-            // 7. 닫기 완료 후 플래그 해제 (경쟁 조건 방지)
+            // 8. 닫기 완료 후 플래그 해제 (경쟁 조건 방지)
             delay(100) // 추가 안전 지연
             isOverlayDismissing = false
         }
@@ -339,6 +344,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                     return
                 }
                 
+                Log.d(TAG, "[상태 전이] ALLOWED → resumeMining() 호출")
                 PointMiningService.resumeMining()
                 Log.d(TAG, "Mining Resumed: 허용 앱으로 전환")
                 preferenceManager.setLastMiningApp(packageName)
@@ -346,6 +352,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                 hideOverlay(shouldGoHome = false)
             }
             MiningState.BLOCKED -> {
+                Log.d(TAG, "[상태 전이] BLOCKED → pauseMining() 호출")
                 PointMiningService.pauseMining()
                 Log.d(TAG, "Mining Paused: 차단 앱 감지 ($packageName)")
                 preferenceManager.setLastMiningApp(packageName)
@@ -372,11 +379,14 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
      * PointMiningService에서 오디오 상태 변경 시 호출됨
      */
     fun onAudioBlockStateChanged(isBlocked: Boolean) {
+        Log.d(TAG, "[오디오 상태 변경] isBlocked=$isBlocked")
         if (isBlocked) {
             // 오디오 차단 감지: ALLOWED → BLOCKED 전이
+            Log.d(TAG, "[오디오 상태 변경] 차단 감지 → 채굴 중단 처리")
             transitionToState(MiningState.BLOCKED, "audio", triggerOverlay = false)
         } else {
             // 오디오 종료: BLOCKED → ALLOWED 전이
+            Log.d(TAG, "[오디오 상태 변경] 차단 해제 → 채굴 재개 처리")
             transitionToState(MiningState.ALLOWED, "audio", triggerOverlay = false)
         }
     }
@@ -429,11 +439,13 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                         hideOverlay(shouldGoHome = true)
                         PointMiningService.resumeMining()
                     }
-                    // Case 2: 오버레이 없이 차단 상태 -> 그냥 홈 이동
-                    else if (PointMiningService.isMiningPaused()) {
-                        Log.d(TAG, "차단 상태(오버레이 없음)에서 화면 OFF -> 홈 이동")
-                        navigateToHome("차단 상태", null)
-                        PointMiningService.resumeMining()
+                    // Case 2: 오버레이 없이 차단 상태 -> 화면 OFF 시 홈 이동 제거 (화면 깜빡임 방지)
+                    // 화면이 꺼진 상태에서는 사용자가 앱을 볼 수 없으므로 홈 이동 불필요
+                    // 화면 ON 시 차단 앱이 보이면 자연스럽게 오버레이가 표시됨
+                    else if (PointMiningService.isMiningPaused() && currentMiningState == MiningState.BLOCKED) {
+                        Log.d(TAG, "차단 상태(오버레이 없음)에서 화면 OFF: 홈 이동 스킵 (화면 깜빡임 방지)")
+                    } else if (PointMiningService.isMiningPaused() && currentMiningState == MiningState.ALLOWED) {
+                        Log.d(TAG, "차단 상태(오버레이 없음)이지만 이미 ALLOWED 상태(홈 화면): 홈 이동 스킵")
                     }
                 }
             }

@@ -495,7 +495,7 @@ sequenceDiagram
 - **책임**:
   - 차단되지 않은 앱 사용 시간 추적
   - 포인트 자동 적립 (1분마다, 화면 ON일 때만)
-  - 오디오 모니터링 (10초마다, 화면 상태와 무관)
+  - 오디오 모니터링 (이벤트 기반: 오디오 상태 변경 시 한 번만 검사)
   - 화면 OFF 시 타이머 중지, ON 시 일괄 정산
   - 차단 앱 오디오 감지 시 채굴 일시정지
 - **주기**: 
@@ -1178,7 +1178,7 @@ onServiceConnected()
 **주요 책임**:
 - 1분마다 포인트 적립 (화면 ON이고 일시정지 상태가 아닐 때만)
 - 화면 OFF 시 타이머 중지, ON 시 일괄 정산
-- 오디오 감시: 차단 앱의 오디오 재생 감지 (10초마다, 화면 상태와 무관하게 작동)
+- 오디오 감시: 차단 앱의 오디오 재생 감지 (이벤트 기반: 오디오 상태 변경 시 한 번만 검사)
 - 차단 앱 오디오 감지 시 채굴 일시정지
 - 포인트 거래 내역 저장 (트랜잭션 보장)
 - 강행 페널티 적용 (`applyOneTimePenalty()`)
@@ -1195,7 +1195,7 @@ Foreground Service 시작 (Notification 표시)
   ↓
 1분마다 포인트 채굴 루프 실행 (화면 ON일 때만)
   ↓
-오디오 감시 시작 (10초마다, 화면 상태와 무관)
+오디오 감시 시작 (이벤트 기반: 오디오 상태 변경 시 한 번만 검사)
 ```
 
 **오디오 감시 로직** (이벤트 기반):
@@ -1458,10 +1458,15 @@ WeeklyResetReceiver.onReceive()
 - **초기 상태 확인**: 콜백 등록 직후 현재 오디오 상태 확인
   - API 29+: `activePlaybackConfigurations`로 활성 세션 확인
   - API 26-28: `isMusicActive`로 확인 후 `checkBlockedAppAudio()` 호출
-- **이벤트 처리**: `onPlaybackConfigChanged()` 콜백에서 "오디오 콜백 호출: N개 세션 감지" 로그 출력
+- **이벤트 처리**: `onPlaybackConfigChanged()` 콜백에서 오디오 상태 변경 시 한 번만 검사
+  - 오디오 재생 시작/종료 시에만 콜백 호출 (주기적 검사 없음)
+  - 검사 결과(`isPausedByAudio`)를 저장하여 포인트 채굴 여부 결정
+  - "오디오 콜백 호출: N개 세션 감지" 로그 출력
 - **PersonaEngine 오디오 재생 제외**: 오버레이가 표시 중일 때는 PersonaEngine의 AudioHandler가 재생하는 오디오일 가능성이 높으므로 검사를 건너뜀
   - `AppBlockingService.isOverlayActive()`로 오버레이 표시 상태 확인
   - 오버레이 표시 중이면 즉시 반환하여 PersonaEngine 오디오 재생이 차단 앱 오디오로 잘못 감지되는 것을 방지
+  - **타이밍 안전성**: 오버레이가 닫힐 때 PersonaEngine 오디오 정지 완료를 기다린 후 `isOverlayActive = false` 설정 (150ms 지연)
+  - 시스템 오디오 콜백의 지연을 고려하여 PersonaEngine 오디오가 완전히 정지된 후 오디오 검사 재개
 - 주의: `AudioPlaybackConfiguration.getClientUid()`는 public API가 아니므로 사용 불가
 - 모든 API 레벨: `AudioManager.isMusicActive`로 오디오 재생 상태 확인
 - `PreferenceManager.getLastMiningApp()`으로 마지막 앱 정보 조회
@@ -1510,8 +1515,11 @@ WeeklyResetReceiver.onReceive()
   - `hideOverlay(shouldGoHome = false)` 호출하여 오버레이만 닫기 (홈 이동은 즉시 하지 않음)
   - `isPendingHomeNavigation = true` 설정하여 홈 이동 예약
   - 채굴은 이미 pause 상태이므로 유지
-- Case 2: 차단 상태(오버레이 없음)에서 화면 OFF → 홈 이동 예약
-  - `isPendingHomeNavigation = true` 설정하여 홈 이동 예약
+- Case 2: 차단 상태(오버레이 없음)에서 화면 OFF → 홈 이동 스킵
+  - 화면이 꺼진 상태에서는 사용자가 앱을 볼 수 없으므로 홈 이동 불필요 (화면 깜빡임 방지)
+  - `PointMiningService.isMiningPaused()`가 true이고 `currentMiningState == MiningState.BLOCKED`인 경우에도 홈 이동 스킵
+  - 이미 `currentMiningState == MiningState.ALLOWED`인 경우(앱 철회 후 홈 이동 완료된 경우) 홈 이동 스킵
+  - 화면 ON 시 차단 앱이 보이면 자연스럽게 오버레이가 표시됨
   - 채굴은 이미 pause 상태이므로 유지
 
 **ACTION_SCREEN_ON 처리 로직**:
@@ -1929,6 +1937,32 @@ checkBlockedAppAudioFromConfigs()에서 플래그 리셋
   - PersonaEngine의 AudioHandler가 재생하는 오디오가 오디오 검사에 의해 감지되지 않음
   - 유죄협상 오버레이 표시 중 PersonaEngine 오디오 재생으로 인한 반복 호출 문제 해결
   - 기존 오디오 검사 로직 보존: 차단 앱 오디오 감지 기능은 정상 작동
+
+### [2026-01-XX] PersonaEngine 오디오 정지 타이밍 안전성 개선
+- **작업**: 오버레이가 닫힐 때 PersonaEngine 오디오가 완전히 정지된 후 오디오 검사를 재개하도록 개선
+- **컴포넌트 영향**: 
+  - `AppBlockingService.hideOverlay()`: PersonaEngine 오디오 정지 완료 대기 로직 추가
+- **변경 사항**:
+  - `DELAY_AFTER_PERSONA_AUDIO_STOP_MS` 상수 추가 (150ms)
+  - `hideOverlay()`에서 `dismiss()` 호출 후 150ms 지연 후 `isOverlayActive = false` 설정
+  - 시스템 오디오 콜백의 지연을 고려한 안전 지연
+- **영향 범위**:
+  - 오버레이가 닫힌 직후 발생하는 오디오 콜백에서 PersonaEngine 오디오가 차단 앱 오디오로 오인식되는 것을 방지
+  - 오디오 검사 재개 시점이 PersonaEngine 오디오 정지 완료 후로 보장됨
+  - 사용자 경험에 미치는 영향 최소화 (150ms 지연)
+
+### [2026-01-XX] 오디오 모니터링 이벤트 기반 명확화
+- **작업**: 아키텍처 문서에서 "10초마다" 주기적 검사 설명 제거, 오디오 상태 변경 시 한 번만 검사한다는 것을 명확히 설명
+- **컴포넌트 영향**: 
+  - `ARCHITECTURE.md`: 오디오 모니터링 설명 수정
+- **변경 사항**:
+  - "10초마다" 주기적 검사 설명 제거
+  - 오디오 상태 변경 시 한 번만 검사한다는 것을 명확히 설명
+  - 검사 결과를 저장하여 포인트 채굴 여부를 결정한다는 것을 명확히 설명
+  - 이벤트 처리 로직 설명 강화
+- **영향 범위**:
+  - 아키텍처 문서의 정확성 향상
+  - 기존 코드 로직은 이미 이벤트 기반으로 구현되어 있음 (변경 없음)
 
 ---
 
