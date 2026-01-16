@@ -461,6 +461,12 @@ class PointMiningService : LifecycleService() {
         try {
             Log.d(TAG, "[오디오 검사] 시작: 세션 수=${configs.size}, isMusicActive=${audioManager.isMusicActive}, 현재 상태: isPausedByAudio=$isPausedByAudio")
             
+            // 오버레이가 표시 중이면 PersonaEngine의 오디오 재생일 가능성이 높으므로 검사 건너뛰기
+            if (AppBlockingService.isOverlayActive()) {
+                Log.d(TAG, "[오디오 검사] 오버레이 표시 중: PersonaEngine 오디오 재생으로 추정되어 검사 건너뜀")
+                return
+            }
+            
             // 활성 세션이 없으면 오디오 종료로 판단
             // 주의: PLAYER_STATE_STARTED는 @SystemApi이므로 공개 API가 아닙니다.
             // 대신 configs 리스트가 비어있지 않고 AudioManager.isMusicActive를 사용합니다.

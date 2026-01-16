@@ -21,10 +21,12 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.faust.R
+import com.faust.data.utils.PreferenceManager
 import com.faust.domain.WeeklyResetService
 import com.faust.models.BlockedApp
 import com.faust.presentation.view.AppSelectionDialog
 import com.faust.presentation.view.BlockedAppAdapter
+import com.faust.presentation.view.PersonaSelectionDialog
 import com.faust.presentation.viewmodel.MainViewModel
 import com.faust.services.AppBlockingService
 import com.faust.services.PointMiningService
@@ -47,10 +49,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var adapter: BlockedAppAdapter
     private lateinit var textCurrentPoints: TextView
     private lateinit var buttonAddApp: Button
+    private lateinit var buttonPersona: Button
     private lateinit var fabStartService: FloatingActionButton
     
     private val prefs: SharedPreferences by lazy {
         getSharedPreferences("faust_alarm_prefs", Context.MODE_PRIVATE)
+    }
+    
+    private val preferenceManager: PreferenceManager by lazy {
+        PreferenceManager(this)
     }
     
     private companion object {
@@ -64,7 +71,7 @@ class MainActivity : AppCompatActivity() {
         if (Settings.canDrawOverlays(this)) {
             startServices()
         } else {
-            Toast.makeText(this, "오버레이 권한이 필요합니다", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.overlay_permission_required), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -74,7 +81,7 @@ class MainActivity : AppCompatActivity() {
         if (checkAccessibilityService()) {
             startServices()
         } else {
-            Toast.makeText(this, "접근성 서비스 권한이 필요합니다", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.accessibility_permission_required), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -84,7 +91,7 @@ class MainActivity : AppCompatActivity() {
         if (isIgnoringBatteryOptimizations()) {
             startServices()
         } else {
-            Toast.makeText(this, "배터리 최적화 제외가 필요합니다", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.battery_optimization_required), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -142,10 +149,15 @@ class MainActivity : AppCompatActivity() {
     private fun setupViews() {
         textCurrentPoints = findViewById(R.id.textCurrentPoints)
         buttonAddApp = findViewById(R.id.buttonAddApp)
+        buttonPersona = findViewById(R.id.buttonPersona)
         fabStartService = findViewById(R.id.fabStartService)
 
         buttonAddApp.setOnClickListener {
             showAddAppDialog()
+        }
+
+        buttonPersona.setOnClickListener {
+            showPersonaDialog()
         }
 
         fabStartService.setOnClickListener {
@@ -196,7 +208,7 @@ class MainActivity : AppCompatActivity() {
             if (currentCount >= maxApps) {
                 Toast.makeText(
                     this@MainActivity,
-                    "최대 $maxApps 개의 앱만 차단할 수 있습니다",
+                    getString(R.string.max_apps_limit, maxApps),
                     Toast.LENGTH_SHORT
                 ).show()
                 return@launch
@@ -213,25 +225,38 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val success = viewModel.addBlockedApp(app)
             if (success) {
-                Toast.makeText(this@MainActivity, "${app.appName} 추가됨", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, getString(R.string.app_added, app.appName), Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(this@MainActivity, "추가 실패", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, getString(R.string.add_failed), Toast.LENGTH_SHORT).show()
             }
         }
     }
 
     private fun removeBlockedApp(app: BlockedApp) {
         AlertDialog.Builder(this)
-            .setTitle("앱 제거")
-            .setMessage("${app.appName}을(를) 차단 목록에서 제거하시겠습니까?")
-            .setPositiveButton("제거") { _, _ ->
+            .setTitle(getString(R.string.remove_app_title))
+            .setMessage(getString(R.string.remove_app_message, app.appName))
+            .setPositiveButton(getString(R.string.remove)) { _, _ ->
                 lifecycleScope.launch {
                     viewModel.removeBlockedApp(app)
-                    Toast.makeText(this@MainActivity, "${app.appName} 제거됨", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, getString(R.string.app_removed, app.appName), Toast.LENGTH_SHORT).show()
                 }
             }
-            .setNegativeButton("취소", null)
+            .setNegativeButton(getString(R.string.cancel), null)
             .show()
+    }
+
+    private fun showPersonaDialog() {
+        val dialog = PersonaSelectionDialog(preferenceManager) { personaTypeString ->
+            if (personaTypeString != null) {
+                preferenceManager.setPersonaType(personaTypeString)
+                Toast.makeText(this, getString(R.string.persona_selected, personaTypeString), Toast.LENGTH_SHORT).show()
+            } else {
+                preferenceManager.setPersonaType("")
+                Toast.makeText(this, getString(R.string.persona_unregister), Toast.LENGTH_SHORT).show()
+            }
+        }
+        dialog.show(supportFragmentManager, "PersonaSelectionDialog")
     }
 
     /**
@@ -285,13 +310,12 @@ class MainActivity : AppCompatActivity() {
      */
     private fun showBatteryOptimizationDialog() {
         AlertDialog.Builder(this)
-            .setTitle("배터리 최적화 제외 필요")
-            .setMessage("백그라운드에서 채굴이 계속되려면 배터리 최적화에서 이 앱을 제외해야 합니다.\n\n" +
-                    "설정 화면에서 '제외' 또는 '허용'을 선택해주세요.")
-            .setPositiveButton("설정으로 이동") { _, _ ->
+            .setTitle(getString(R.string.battery_optimization_title))
+            .setMessage(getString(R.string.battery_optimization_message))
+            .setPositiveButton(getString(R.string.go_to_settings)) { _, _ ->
                 requestBatteryOptimizationExclusion()
             }
-            .setNegativeButton("나중에") { _, _ ->
+            .setNegativeButton(getString(R.string.later)) { _, _ ->
                 // 사용자가 나중에 하기로 선택해도 서비스는 시작
                 startServices()
             }
@@ -334,18 +358,18 @@ class MainActivity : AppCompatActivity() {
         val missingPermissions = mutableListOf<String>()
         
         if (!checkOverlayPermission()) {
-            missingPermissions.add("다른 앱 위에 표시 권한")
+            missingPermissions.add(getString(R.string.overlay_permission_name))
         }
         
         if (missingPermissions.isNotEmpty()) {
+            val permissionsList = missingPermissions.joinToString("\n") { "• $it" }
             AlertDialog.Builder(this)
-                .setTitle("권한 필요")
-                .setMessage("앱 기능을 위해 다음 권한이 필요합니다:\n\n" +
-                        missingPermissions.joinToString("\n") { "• $it" })
-                .setPositiveButton("설정으로 이동") { _, _ ->
+                .setTitle(getString(R.string.permissions_required_title))
+                .setMessage(getString(R.string.permissions_required_message, permissionsList))
+                .setPositiveButton(getString(R.string.go_to_settings)) { _, _ ->
                     requestPermissions()
                 }
-                .setNegativeButton("나중에", null)
+                .setNegativeButton(getString(R.string.later), null)
                 .setCancelable(false)
                 .show()
         }
@@ -364,14 +388,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun showPermissionDialog() {
         AlertDialog.Builder(this)
-            .setTitle("권한 필요")
-            .setMessage("앱 차단 기능을 사용하려면 다음 권한이 필요합니다:\n\n" +
-                    "1. 접근성 서비스 권한\n" +
-                    "2. 다른 앱 위에 표시 권한")
-            .setPositiveButton("설정") { _, _ ->
+            .setTitle(getString(R.string.permissions_required_title))
+            .setMessage(getString(R.string.permission_dialog_message))
+            .setPositiveButton(getString(R.string.settings)) { _, _ ->
                 requestPermissions()
             }
-            .setNegativeButton("취소", null)
+            .setNegativeButton(getString(R.string.cancel), null)
             .show()
     }
 
@@ -395,9 +417,9 @@ class MainActivity : AppCompatActivity() {
         if (checkAllPermissions()) {
             // 접근성 서비스는 시스템이 자동으로 시작하므로 별도 시작 불필요
             PointMiningService.startService(this)
-            Toast.makeText(this, "서비스 시작됨", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.service_started), Toast.LENGTH_SHORT).show()
         } else {
-            Toast.makeText(this, "모든 권한이 필요합니다", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.all_permissions_required), Toast.LENGTH_SHORT).show()
         }
     }
     

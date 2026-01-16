@@ -18,5 +18,10 @@ enum class PersonaType {
     /**
      * 규칙적 압박: 일정한 리듬의 피드백
      */
-    DIPLOMATIC
+    DIPLOMATIC,
+    
+    /**
+     * 편안한 위로: 부드럽고 편안한 피드백
+     */
+    COMFORTABLE
 }

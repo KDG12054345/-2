@@ -81,7 +81,8 @@ com.faust/
 │       │   ├── MainActivity.kt                    # 메인 액티비티
 │       │   ├── GuiltyNegotiationOverlay.kt        # 유죄 협상 오버레이
 │       │   ├── BlockedAppAdapter.kt                # 차단 앱 리스트 어댑터
-│       │   └── AppSelectionDialog.kt              # 앱 선택 다이얼로그
+│       │   ├── AppSelectionDialog.kt              # 앱 선택 다이얼로그
+│       │   └── PersonaSelectionDialog.kt           # 페르소나 선택 다이얼로그
 │       └── viewmodel/
 │           └── MainViewModel.kt                  # 메인 ViewModel (MVVM)
 │
@@ -268,7 +269,15 @@ sequenceDiagram
     
     PersonaEngine->>PersonaProvider: getPersonaProfile()
     PersonaProvider->>PreferenceManager: getPersonaTypeString()
-    PreferenceManager-->>PersonaProvider: "CALM"
+    PreferenceManager-->>PersonaProvider: "CALM" 또는 ""
+    
+    alt 페르소나가 등록된 경우
+        PersonaProvider->>PersonaProvider: 해당 페르소나 프로필 생성
+    else 페르소나가 등록되지 않은 경우
+        PersonaProvider->>PersonaProvider: createRandomProfile() 호출
+        PersonaProvider->>PersonaProvider: 모든 페르소나 프롬프트 중 랜덤 선택
+    end
+    
     PersonaProvider-->>PersonaEngine: PersonaProfile
     
     PersonaEngine->>AudioManager: 무음 모드 확인
@@ -390,11 +399,15 @@ sequenceDiagram
 - **의존성**: 
   - `MainViewModel` (데이터 관찰 및 비즈니스 로직)
   - `AppBlockingService`, `PointMiningService` (서비스 제어)
+  - `PreferenceManager` (페르소나 설정 관리)
 - **UI 업데이트**: 
   - ViewModel의 StateFlow를 관찰하여 UI 자동 업데이트
   - 포인트: `viewModel.currentPoints` StateFlow 구독
   - 차단 앱 목록: `viewModel.blockedApps` StateFlow 구독
   - 거래 내역: `viewModel.transactions` StateFlow 구독 (포인트 정산 로그 포함)
+- **페르소나 선택 기능**:
+  - `showPersonaDialog()`: PersonaSelectionDialog를 표시하여 페르소나 선택 또는 등록 해제
+  - 선택된 페르소나는 PreferenceManager에 저장
 - **경량화**: 데이터베이스 직접 접근 제거, ViewModel을 통한 간접 접근
 
 #### MainViewModel
@@ -432,6 +445,19 @@ sequenceDiagram
   - `PixelFormat.TRANSLUCENT`로 알파 채널 렌더링 시 가속 지원
   - `dimAmount = 0.5f`로 배경 어둡게 처리 (하드웨어 가속 시 부드러운 렌더링)
   - 앱 전체 하드웨어 가속: `AndroidManifest.xml`의 `<application>` 태그에 `android:hardwareAccelerated="true"` 설정
+
+#### PersonaSelectionDialog
+- **책임**: 페르소나 선택 및 등록 해제 다이얼로그
+- **기능**:
+  - 모든 페르소나 타입(STREET, CALM, DIPLOMATIC, COMFORTABLE)을 리스트로 표시
+  - 각 페르소나에 대한 설명 표시
+  - 현재 선택된 페르소나 표시 (체크마크)
+  - "등록 해제" 옵션 제공 (랜덤 텍스트 사용)
+- **의존성**:
+  - `PreferenceManager` (페르소나 타입 저장/조회)
+- **주요 메서드**:
+  - `onCreateDialog()`: 다이얼로그 생성 및 페르소나 리스트 표시
+  - `PersonaAdapter`: 페르소나 리스트 어댑터
 
 ### 2. Service Layer
 
@@ -556,7 +582,17 @@ sequenceDiagram
   - `STREET`: 불규칙 자극 (빠른 리듬 진동)
   - `CALM`: 부드러운 성찰 (부드러운 진동)
   - `DIPLOMATIC`: 규칙적 압박 (규칙적 진동)
-- **기본값**: `CALM`
+  - `COMFORTABLE`: 편안한 위로 (부드럽고 편안한 피드백)
+- **등록되지 않은 경우 (랜덤 텍스트)**:
+  - `getPersonaType()`가 `null`을 반환하면 `createRandomProfile()` 호출
+  - 모든 페르소나 타입의 프롬프트 텍스트를 수집
+  - 랜덤으로 하나 선택하여 PersonaProfile 반환
+  - 진동 패턴: 기본값 `listOf(200, 200, 200)`
+  - 오디오: `null`
+- **주요 메서드**:
+  - `getPersonaProfile()`: 현재 설정된 페르소나 프로필 반환 (등록되지 않은 경우 랜덤)
+  - `getPersonaType()`: PreferenceManager에서 페르소나 타입 읽기 (등록되지 않은 경우 `null`)
+  - `createRandomProfile()`: 모든 페르소나의 프롬프트 텍스트 중 랜덤 선택
 
 #### VisualHandler
 - **책임**: 페르소나가 제시하는 문구를 화면에 표시하고 사용자 입력을 검증합니다
@@ -753,10 +789,14 @@ MainActivity
   ├─► MainViewModel
   ├─► AppBlockingService
   ├─► PointMiningService
-  └─► WeeklyResetService
+  ├─► WeeklyResetService
+  └─► PreferenceManager
 
 MainViewModel
   ├─► FaustDatabase
+  └─► PreferenceManager
+
+PersonaSelectionDialog
   └─► PreferenceManager
 
 AppBlockingService
@@ -1419,6 +1459,9 @@ WeeklyResetReceiver.onReceive()
   - API 29+: `activePlaybackConfigurations`로 활성 세션 확인
   - API 26-28: `isMusicActive`로 확인 후 `checkBlockedAppAudio()` 호출
 - **이벤트 처리**: `onPlaybackConfigChanged()` 콜백에서 "오디오 콜백 호출: N개 세션 감지" 로그 출력
+- **PersonaEngine 오디오 재생 제외**: 오버레이가 표시 중일 때는 PersonaEngine의 AudioHandler가 재생하는 오디오일 가능성이 높으므로 검사를 건너뜀
+  - `AppBlockingService.isOverlayActive()`로 오버레이 표시 상태 확인
+  - 오버레이 표시 중이면 즉시 반환하여 PersonaEngine 오디오 재생이 차단 앱 오디오로 잘못 감지되는 것을 방지
 - 주의: `AudioPlaybackConfiguration.getClientUid()`는 public API가 아니므로 사용 불가
 - 모든 API 레벨: `AudioManager.isMusicActive`로 오디오 재생 상태 확인
 - `PreferenceManager.getLastMiningApp()`으로 마지막 앱 정보 조회
@@ -1437,6 +1480,7 @@ WeeklyResetReceiver.onReceive()
 **관련 컴포넌트**:
 - `PointMiningService.startAudioMonitoring()`: 오디오 모니터링 시작 (API 26+ 체크 포함)
 - `PointMiningService.stopAudioMonitoring()`: 오디오 모니터링 중지 (API 26+ 체크 포함)
+- `AppBlockingService.isOverlayActive()`: 오버레이 표시 상태 확인 (PersonaEngine 오디오 재생 제외용)
 - `AudioPlaybackCallback`: 오디오 상태 변경 이벤트 수신 (API 26+)
 - `AudioPlaybackConfiguration`: 활성 오디오 재생 세션 정보 (API 29+)
 - `AudioManager.activePlaybackConfigurations`: 현재 활성 오디오 세션 조회 (API 29+)
@@ -1825,6 +1869,66 @@ checkBlockedAppAudioFromConfigs()에서 플래그 리셋
   - 화면 OFF 시 차단 앱 오디오 재생 중이면 채굴 중지 상태를 기록
   - 화면 ON 후 허용 앱으로 전환되어도 오디오가 종료될 때까지 채굴 재개하지 않음
   - 오디오 종료 시 자동으로 플래그가 리셋되어 정상적으로 채굴 재개
+
+### [2026-01-XX] 페르소나 관리 UI 구현
+- **작업**: UI에 페르소나 선택 창을 추가하고, 등록된 페르소나를 사용하며, 등록되지 않았을 때는 모든 페르소나의 프롬프트 텍스트 중 랜덤으로 출력하도록 구현
+- **컴포넌트 영향**:
+  - `PersonaSelectionDialog`: 페르소나 선택 다이얼로그 신규 생성
+  - `PreferenceManager`: `getPersonaTypeString()` 기본값을 빈 문자열로 변경
+  - `PersonaProvider`: 빈 문자열 처리 및 `createRandomProfile()` 메서드 추가
+  - `MainActivity`: 페르소나 선택 버튼 및 `showPersonaDialog()` 메서드 추가
+  - `activity_main.xml`: 페르소나 선택 버튼 추가
+  - `strings.xml`: 페르소나 관련 문자열 리소스 추가
+- **변경 사항**:
+  - `PersonaSelectionDialog.kt` 신규 생성: 모든 페르소나 타입 표시 및 등록 해제 옵션 제공
+  - `PreferenceManager.getPersonaTypeString()`: 기본값을 `"STREET"`에서 `""` (빈 문자열)로 변경
+  - `PersonaProvider.getPersonaType()`: 빈 문자열일 때 `null` 반환하도록 수정
+  - `PersonaProvider.getPersonaProfile()`: `getPersonaType()`가 `null`일 때 `createRandomProfile()` 호출
+  - `PersonaProvider.createRandomProfile()`: 모든 페르소나의 프롬프트 텍스트 중 랜덤 선택
+  - `MainActivity`: `buttonPersona` 변수 추가, `showPersonaDialog()` 메서드 추가
+  - `activity_main.xml`: 페르소나 선택 버튼 추가
+  - `strings.xml`: 페르소나 선택 관련 문자열 리소스 추가
+- **영향 범위**:
+  - 사용자가 페르소나를 선택하거나 등록 해제할 수 있는 UI 제공
+  - 등록되지 않은 경우 모든 페르소나의 프롬프트 텍스트 중 랜덤으로 선택하여 출력
+  - 기존 페르소나 로직 보존: 등록된 페르소나는 기존과 동일하게 동작
+
+### [2026-01-16] PersonaProvider 컴파일 오류 수정
+- **작업**: `getPersonaType()` 메서드의 변수 스코프 문제로 인한 컴파일 오류 수정
+- **컴포넌트 영향**: `PersonaProvider.getPersonaType()`
+- **변경 사항**:
+  - `typeName` 변수를 `try` 블록 밖으로 이동하여 `catch` 블록에서 접근 가능하도록 수정
+  - 변수 스코프 문제 해결로 "Unresolved reference: typeName" 컴파일 오류 해결
+- **영향 범위**:
+  - 컴파일 오류 해결로 빌드 성공
+  - 기존 로직 보존: 예외 처리 및 로깅 기능 유지
+
+### [2026-01-XX] 유죄협상 오버레이 중복 호출 방지
+- **작업**: `TYPE_WINDOW_STATE_CHANGED` 이벤트가 반복 발생하여 유죄협상 오버레이가 중복 호출되는 문제 해결
+- **컴포넌트 영향**: `AppBlockingService.handleAppLaunch()`
+- **변경 사항**:
+  - 중복 호출 방지 메커니즘 추가: `lastHandledPackage`, `lastHandledTime`, `HANDLE_APP_LAUNCH_DEBOUNCE_MS` (500ms)
+  - `handleAppLaunch()` 시작 부분에 디바운스 로직 추가: 500ms 내 같은 패키지에 대한 중복 호출 차단
+  - 마지막 처리 정보를 업데이트하여 중복 호출 방지
+- **영향 범위**:
+  - `TYPE_WINDOW_STATE_CHANGED` 이벤트가 반복 발생해도 같은 패키지는 500ms 내 한 번만 처리
+  - 오버레이 중복 표시 문제 해결
+  - 기존 로직 보존: Cool-down, Grace Period, 상태 전이 시스템 유지
+
+### [2026-01-16] PersonaEngine 오디오 재생으로 인한 유죄협상 반복 호출 방지
+- **작업**: PersonaEngine의 AudioHandler가 재생하는 오디오가 오디오 검사 로직에 의해 차단 앱 오디오로 잘못 감지되어 유죄협상이 반복 호출되는 문제 해결
+- **컴포넌트 영향**: 
+  - `AppBlockingService`: 오버레이 표시 상태 추적을 위한 companion object static 변수 추가
+  - `PointMiningService`: 오버레이 표시 중일 때 오디오 검사 건너뛰기
+- **변경 사항**:
+  - `AppBlockingService` companion object에 `isOverlayActive` static 변수 추가 및 `isOverlayActive()` 메서드 추가
+  - `AppBlockingService.showOverlay()`에서 오버레이 표시 시 `isOverlayActive = true` 설정
+  - `AppBlockingService.hideOverlay()`에서 오버레이 닫힐 때 `isOverlayActive = false` 설정
+  - `PointMiningService.checkBlockedAppAudioFromConfigs()`에서 오버레이 표시 중이면 오디오 검사 건너뛰기
+- **영향 범위**:
+  - PersonaEngine의 AudioHandler가 재생하는 오디오가 오디오 검사에 의해 감지되지 않음
+  - 유죄협상 오버레이 표시 중 PersonaEngine 오디오 재생으로 인한 반복 호출 문제 해결
+  - 기존 오디오 검사 로직 보존: 차단 앱 오디오 감지 기능은 정상 작동
 
 ---
 

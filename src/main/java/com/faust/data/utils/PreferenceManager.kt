@@ -178,10 +178,10 @@ class PreferenceManager(context: Context) {
     // Persona Type
     fun getPersonaTypeString(): String {
         return try {
-            prefs.getString(KEY_PERSONA_TYPE, "STREET") ?: "STREET"
+            prefs.getString(KEY_PERSONA_TYPE, "") ?: ""
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get persona type", e)
-            "STREET"
+            ""
         }
     }
 

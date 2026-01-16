@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Faust</string>
+    
+    <!-- Permissions -->
+    <string name="permission_usage_stats_title">Usage Stats Permission Required</string>
+    <string name="permission_usage_stats_message">Usage stats permission is required to track app usage.</string>
+    <string name="permission_overlay_title">Display Over Other Apps Permission Required</string>
+    <string name="permission_overlay_message">Display over other apps permission is required to use the blocking feature.</string>
+    <string name="overlay_permission_required">Overlay permission is required</string>
+    <string name="accessibility_permission_required">Accessibility service permission is required</string>
+    <string name="battery_optimization_required">Battery optimization exclusion is required</string>
+    <string name="permissions_required_title">Permissions Required</string>
+    <string name="permissions_required_message">The following permissions are required for app functionality:\n\n%1$s</string>
+    <string name="permission_dialog_message">The following permissions are required to use the app blocking feature:\n\n1. Accessibility service permission\n2. Display over other apps permission</string>
+    <string name="overlay_permission_name">Display over other apps permission</string>
+    
+    <!-- Main Screen -->
+    <string name="current_points">Current Points: %1$d WP</string>
+    <string name="blocked_apps">Blocked Apps</string>
+    <string name="add_app">Add App</string>
+    <string name="no_blocked_apps">No blocked apps</string>
+    <string name="max_apps_limit">You can only block up to %1$d apps</string>
+    <string name="app_added">%1$s added</string>
+    <string name="add_failed">Failed to add</string>
+    <string name="remove_app_title">Remove App</string>
+    <string name="remove_app_message">Remove %1$s from the block list?</string>
+    <string name="remove">Remove</string>
+    <string name="app_removed">%1$s removed</string>
+    <string name="service_started">Service started</string>
+    <string name="all_permissions_required">All permissions are required</string>
+    
+    <!-- Guilty Negotiation Screen -->
+    <string name="guilty_negotiation_title">App Launch Confirmation</string>
+    <string name="guilty_negotiation_message">Launching this app will deduct 3 WP.</string>
+    <string name="proceed">Proceed</string>
+    <string name="cancel">Cancel</string>
+    <string name="wait_time">Wait time: %1$d seconds</string>
+    <string name="input_hint">Enter the phrase above exactly</string>
+    
+    <!-- App Selection Dialog -->
+    <string name="select_app">Select App</string>
+    <string name="category_all">📱 All</string>
+    <string name="category_social">💬 Social</string>
+    <string name="category_game">🎮 Game</string>
+    <string name="category_video">🎬 Video</string>
+    <string name="category_browser">🌐 Browser</string>
+    <string name="category_other">📂 Other</string>
+    
+    <!-- Battery Optimization -->
+    <string name="battery_optimization_title">Battery Optimization Exclusion Required</string>
+    <string name="battery_optimization_message">To continue mining in the background, this app must be excluded from battery optimization.\n\nPlease select \'Exclude\' or \'Allow\' in the settings screen.</string>
+    <string name="go_to_settings">Go to Settings</string>
+    <string name="later">Later</string>
+    <string name="settings">Settings</string>
+    
+    <!-- Persona Prompts -->
+    <string name="persona_prompt_street_1">Yo fam, secure the bag. Don\'t get caught lackin</string>
+    <string name="persona_prompt_street_2">Manifest that win, then go claim that W. No cap</string>
+    <string name="persona_prompt_calm">Wait, is this really necessary?</string>
+    <string name="persona_prompt_diplomatic">Think again</string>
+    
+    <!-- Service Notifications -->
+    <string name="notification_channel_app_blocking">App Blocking</string>
+    <string name="notification_channel_point_mining">Point Mining</string>
+    <string name="notification_app_blocking_title">App Blocking Active</string>
+    <string name="notification_point_mining_title">Mining Points</string>
+    
+    <!-- Accessibility Service -->
+    <string name="accessibility_service_description">Detects app launches to monitor blocked apps.</string>
+    
+    <!-- Placeholders (for layouts) -->
+    <string name="app_name_placeholder">App Name</string>
+    <string name="package_name_placeholder">com.example.app</string>
+</resources>

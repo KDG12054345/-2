@@ -26,6 +26,8 @@
     <string name="persona_prompt_street_2">Manifest that win, then go claim that W. No cap</string>
     <string name="persona_prompt_calm">잠깐, 이게 정말 필요한 행동인가요?</string>
     <string name="persona_prompt_diplomatic">다시 한 번 생각해보세요</string>
+    <string name="persona_prompt_comfortable_1_kim">이 앱을 닫고 나면, 당신에게 더 소중한 시간이 기다리고 있을 거예요.</string>
+    <string name="persona_prompt_comfortable_2_kim">잠시 숨을 고르고, 정말 지금 확인해야 하는 일인지 생각해보세요.</string>
     
     <!-- 서비스 알림 -->
     <string name="notification_channel_app_blocking">앱 차단</string>
@@ -35,4 +37,61 @@
     
     <!-- 접근성 서비스 -->
     <string name="accessibility_service_description">앱 실행을 감지하여 차단된 앱을 모니터링합니다.</string>
+    
+    <!-- 권한 관련 추가 -->
+    <string name="overlay_permission_required">오버레이 권한이 필요합니다</string>
+    <string name="accessibility_permission_required">접근성 서비스 권한이 필요합니다</string>
+    <string name="battery_optimization_required">배터리 최적화 제외가 필요합니다</string>
+    <string name="permissions_required_title">권한 필요</string>
+    <string name="permissions_required_message">앱 기능을 위해 다음 권한이 필요합니다:\n\n%1$s</string>
+    <string name="permission_dialog_message">앱 차단 기능을 사용하려면 다음 권한이 필요합니다:\n\n1. 접근성 서비스 권한\n2. 다른 앱 위에 표시 권한</string>
+    <string name="overlay_permission_name">다른 앱 위에 표시 권한</string>
+    
+    <!-- 메인 화면 추가 -->
+    <string name="max_apps_limit">최대 %1$d개의 앱만 차단할 수 있습니다</string>
+    <string name="app_added">%1$s 추가됨</string>
+    <string name="add_failed">추가 실패</string>
+    <string name="remove_app_title">앱 제거</string>
+    <string name="remove_app_message">%1$s을(를) 차단 목록에서 제거하시겠습니까?</string>
+    <string name="remove">제거</string>
+    <string name="app_removed">%1$s 제거됨</string>
+    <string name="service_started">서비스 시작됨</string>
+    <string name="all_permissions_required">모든 권한이 필요합니다</string>
+    
+    <!-- 유죄 협상 화면 추가 -->
+    <string name="input_hint">위 문구를 정확히 입력하세요</string>
+    
+    <!-- 앱 선택 다이얼로그 -->
+    <string name="select_app">앱 선택</string>
+    <string name="category_all">📱 전체</string>
+    <string name="category_social">💬 소셜</string>
+    <string name="category_game">🎮 게임</string>
+    <string name="category_video">🎬 비디오</string>
+    <string name="category_browser">🌐 브라우저</string>
+    <string name="category_other">📂 기타</string>
+    
+    <!-- 배터리 최적화 -->
+    <string name="battery_optimization_title">배터리 최적화 제외 필요</string>
+    <string name="battery_optimization_message">백그라운드에서 채굴이 계속되려면 배터리 최적화에서 이 앱을 제외해야 합니다.\n\n설정 화면에서 \'제외\' 또는 \'허용\'을 선택해주세요.</string>
+    <string name="go_to_settings">설정으로 이동</string>
+    <string name="later">나중에</string>
+    <string name="settings">설정</string>
+    
+    <!-- 플레이스홀더 (레이아웃용) -->
+    <string name="app_name_placeholder">App Name</string>
+    <string name="package_name_placeholder">com.example.app</string>
+    
+    <!-- 페르소나 선택 -->
+    <string name="persona_selection">페르소나 선택</string>
+    <string name="persona_street_name">Street</string>
+    <string name="persona_street_description">불규칙 자극: 빠르고 강렬한 피드백</string>
+    <string name="persona_calm_name">Calm</string>
+    <string name="persona_calm_description">부드러운 성찰: 느리고 차분한 피드백</string>
+    <string name="persona_diplomatic_name">Diplomatic</string>
+    <string name="persona_diplomatic_description">규칙적 압박: 일정한 리듬의 피드백</string>
+    <string name="persona_comfortable_name">Comfortable</string>
+    <string name="persona_comfortable_description">편안한 위로: 부드럽고 편안한 피드백</string>
+    <string name="persona_unregister">등록 해제</string>
+    <string name="persona_unregister_description">랜덤 텍스트 사용</string>
+    <string name="persona_selected">%1$s 페르소나가 선택되었습니다</string>
 </resources>

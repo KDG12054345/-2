@@ -31,7 +31,7 @@
                 android:id="@+id/textAppName"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="App Name"
+                android:text="@string/app_name_placeholder"
                 android:textSize="16sp"
                 android:textStyle="bold"
                 android:importantForAccessibility="no" />
@@ -40,7 +40,7 @@
                 android:id="@+id/textPackageName"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="com.example.app"
+                android:text="@string/package_name_placeholder"
                 android:textSize="12sp"
                 android:textColor="@android:color/darker_gray"
                 android:importantForAccessibility="no" />
@@ -51,7 +51,7 @@
             android:id="@+id/buttonRemove"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="제거"
+            android:text="@string/remove"
             android:textSize="12sp"
             style="@style/Widget.MaterialComponents.Button.TextButton"
             android:focusable="true"

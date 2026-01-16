@@ -19,42 +19,42 @@
             android:id="@+id/chipAll"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="📱 전체"
+            android:text="@string/category_all"
             style="@style/Widget.MaterialComponents.Chip.Choice" />
 
         <com.google.android.material.chip.Chip
             android:id="@+id/chipSocial"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="💬 소셜"
+            android:text="@string/category_social"
             style="@style/Widget.MaterialComponents.Chip.Choice" />
 
         <com.google.android.material.chip.Chip
             android:id="@+id/chipGame"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="🎮 게임"
+            android:text="@string/category_game"
             style="@style/Widget.MaterialComponents.Chip.Choice" />
 
         <com.google.android.material.chip.Chip
             android:id="@+id/chipVideo"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="🎬 비디오"
+            android:text="@string/category_video"
             style="@style/Widget.MaterialComponents.Chip.Choice" />
 
         <com.google.android.material.chip.Chip
             android:id="@+id/chipBrowser"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="🌐 브라우저"
+            android:text="@string/category_browser"
             style="@style/Widget.MaterialComponents.Chip.Choice" />
 
         <com.google.android.material.chip.Chip
             android:id="@+id/chipOther"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="📂 기타"
+            android:text="@string/category_other"
             style="@style/Widget.MaterialComponents.Chip.Choice" />
 
     </com.google.android.material.chip.ChipGroup>

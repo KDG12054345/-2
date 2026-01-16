@@ -52,9 +52,9 @@ class AppSelectionDialog(
         observeFilteredApps()
 
         return AlertDialog.Builder(requireContext())
-            .setTitle("앱 선택")
+            .setTitle(getString(R.string.select_app))
             .setView(view)
-            .setNegativeButton("취소", null)
+            .setNegativeButton(getString(R.string.cancel), null)
             .create()
     }
 
