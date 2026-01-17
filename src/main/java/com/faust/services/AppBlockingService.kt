@@ -204,6 +204,15 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         val isBlocked = blockedAppsCache.contains(packageName)
 
         if (isBlocked) {
+            // Grace Period 체크: 강행 버튼을 눌러 페널티를 지불한 앱은 중복 징벌 방지
+            if (packageName == lastAllowedPackage) {
+                Log.d(TAG, "Grace Period 활성: 중복 징벌 방지 - 오버레이 표시 차단 ($packageName)")
+                // Grace Period가 활성화된 경우에도 채굴은 중단해야 함 (상태 전이는 수행)
+                // 하지만 오버레이는 표시하지 않음
+                transitionToState(MiningState.BLOCKED, packageName, triggerOverlay = false)
+                return
+            }
+            
             // 쿨다운 체크: 같은 앱이 최근에 홈으로 이동했고 쿨다운 시간 내면 오버레이 표시 차단
             if (packageName == lastHomeNavigationPackage && 
                 (currentTime - lastHomeNavigationTime) < COOLDOWN_DURATION_MS) {
