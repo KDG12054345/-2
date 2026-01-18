@@ -33,11 +33,19 @@ import com.faust.services.PointMiningService
 import kotlinx.coroutines.*
 
 /**
+ * 오버레이 닫힘 완료 콜백 인터페이스
+ */
+interface OverlayDismissCallback {
+    fun onDismissed()
+}
+
+/**
  * [핵심 이벤트: 차단 관련 이벤트 - showOverlay]
  * * 역할: 차단 대상 앱임이 확인되면 화면 최상단에 표시되는 오버레이입니다.
  */
 class GuiltyNegotiationOverlay(
-    private val context: Context
+    private val context: Context,
+    private val dismissCallback: OverlayDismissCallback? = null
 ) : LifecycleOwner {
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
@@ -145,10 +153,20 @@ class GuiltyNegotiationOverlay(
         overlayView?.let { view ->
             try {
                 windowManager?.removeView(view)
+                // 뷰 제거 완료 후 콜백 호출 (메인 스레드에서 실행)
+                view.post {
+                    dismissCallback?.onDismissed()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to remove overlay view", e)
+                // 실패해도 콜백 호출 (상태 복구를 위해)
+                dismissCallback?.onDismissed()
             }
+        } ?: run {
+            // overlayView가 null이어도 콜백 호출
+            dismissCallback?.onDismissed()
         }
+        
         overlayView = null
         windowManager = null
         isUserActionCompleted = false
@@ -247,12 +265,18 @@ class GuiltyNegotiationOverlay(
         isUserActionCompleted = true
 
         coroutineScope.launch {
-            // 페널티 적용
-            penaltyService.applyQuitPenalty(packageName, appName)
+            // 페널티 적용 및 결과 확인
+            val penaltyApplied = penaltyService.applyQuitPenalty(packageName, appName)
+            
+            // 패널티 적용 실패 시 로깅 (Grace Period는 적용하지 않음)
+            if (!penaltyApplied) {
+                Log.w(TAG, "패널티 적용 실패: 포인트 부족 또는 오류 발생 ($packageName)")
+            }
 
             // [핵심] 서비스에게 오버레이 닫기 및 홈 이동 요청
             // shouldGoHome = true -> 강제로 홈으로 튕겨냄
-            (context as? AppBlockingService)?.hideOverlay(shouldGoHome = true)
+            // applyCooldown = false -> 철회 버튼 클릭 시 쿨다운 면제 (빠른 재실행 허용)
+            (context as? AppBlockingService)?.hideOverlay(shouldGoHome = true, applyCooldown = false)
         }
     }
 

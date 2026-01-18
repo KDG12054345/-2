@@ -281,8 +281,19 @@ sequenceDiagram
 
 **처리 로직**:
 - `event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED` 확인
+- **필터링 1: IGNORED_PACKAGES 체크**: 시스템 UI 패키지 무시
+- **필터링 1.5: 오버레이 패키지의 FrameLayout 이벤트 필터링**: `com.faust` 패키지의 FrameLayout 이벤트 무시 (오버레이가 표시된 후 불필요한 이벤트 발생 방지)
+- **Window ID 검사**: `event.windowId`로 실제 창 전환만 감지
+  - Window ID가 유효한 경우: 같은 창이면 무시 (화면 내부 변화 제외)
+  - Window ID가 -1(UNDEFINED)인 경우: 오버레이 상태 확인하여 IDLE 상태면 처리 허용
+- **클래스 이름 검증**: Layout은 항상 허용
+  - Activity/Dialog/Fragment/Layout 모두 허용 (FrameLayout, LinearLayout 등 포함)
+  - 단, 오버레이 패키지(`com.faust`)의 FrameLayout은 사전 필터링됨
+  - Window ID 검사와 오버레이 상태 체크로 이미 중복 방지하고 있으므로 더 관대하게 처리
+- **코루틴 Throttling**: 300ms 지연으로 연속 이벤트를 마지막 것만 처리
 - `event.packageName`에서 패키지명 추출
 - `handleAppLaunch()` 호출
+- **상태 전이 즉시화**: `hideOverlay()`에서 오버레이 닫힘 시 즉시 `overlayState=IDLE`, `lastWindowId=-1`, `lastProcessedPackage=null`로 리셋하여 재진입 즉시 허용
 
 **관련 컴포넌트**:
 - `AppBlockingService`: 이벤트 수신 및 처리
@@ -321,11 +332,32 @@ sequenceDiagram
 - 30초 카운트다운 시작
 
 **중복 방지 메커니즘**:
-- **동기 체크**: 함수 진입 시 `currentOverlay != null`이면 즉시 반환
-- **오버레이 닫기 중 플래그**: `isOverlayDismissing` 플래그로 닫기 중인 경우 새 오버레이 생성 차단
-- **Cool-down 체크**: `showOverlay()` 내부에서도 Cool-down 시간 내인지 확인
-- **비동기 이중 체크**: `serviceScope.launch` 내부에서 `currentOverlay == null && !isOverlayDismissing` 재확인
-- `hideOverlay()`에서 `isOverlayDismissing = true` 설정 후 `currentOverlay = null` 설정하여 경쟁 조건 방지
+- **Window ID 검사**: `event.windowId`로 실제 창 전환만 감지 (같은 창이면 무시하여 화면 내부 변화 제외)
+- **클래스 이름 검증**: `event.className`으로 Activity/Dialog만 처리 (Toast, Notification 등 제외)
+- **코루틴 Throttling**: 300ms 지연으로 연속 이벤트를 마지막 것만 처리 (시스템 이벤트 중복 차단)
+- **상태 머신 패턴**: `OverlayState` enum (IDLE, SHOWING, DISMISSING)으로 오버레이 생명주기 명확히 관리
+- **상태 전이 제어**: DISMISSING 상태일 때는 어떤 앱 실행 이벤트도 무시하여 "닫히는 도중 다시 뜨는" 현상 원천 차단
+- **동기 체크**: 함수 진입 시 `currentOverlay != null || overlayState != IDLE`이면 즉시 반환
+- **비동기 이중 체크**: `serviceScope.launch` 내부에서 상태 머신 재확인
+- **즉시 상태 동기화**: `hideOverlay()`에서 오버레이 참조를 백업한 후 즉시 `currentOverlay = null`, `overlayState = DISMISSING` 설정
+- **리소스 정리 보장**: 백업한 참조로 `dismiss()` 호출하여 PersonaEngine 오디오 정지 및 WindowManager 뷰 제거 보장
+- **콜백 패턴**: `OverlayDismissCallback`으로 오버레이 닫힘 완료 시점 명확화
+- **쿨다운 면제**: 철회 버튼 클릭 시 `applyCooldown=false`로 쿨다운 면제하여 의도적 재실행 허용
+  - 쿨다운 변수(`lastHomeNavigationPackage`, `lastHomeNavigationTime`)를 명시적으로 리셋하여 재실행 시 오버레이 표시 보장
+  - 스레드 안전성을 위해 `@Volatile` 어노테이션 적용
+- **상태 변경 기반 오버레이 표시**: `transitionToState()`에서 `isStateChanged=false`인 경우 오버레이 표시하지 않음
+  - `hideOverlay()` 직후 같은 상태로 재전이되는 경우 중복 표시 방지
+  - `isStateChanged=true && previousState=ALLOWED`인 경우만 오버레이 표시 (실제 상태 전이 발생 시에만)
+- **스레드 안전성**: 모든 공유 변수에 `@Volatile` 어노테이션 적용
+  - `currentOverlay`, `overlayState`: 오버레이 상태 관리
+  - `lastWindowId`, `lastProcessedPackage`: Window ID 기반 중복 호출 방지
+  - `lastAllowedPackage`: Grace Period 체크
+  - `currentBlockedPackage`, `currentBlockedAppName`: 현재 협상 중인 앱 정보
+  - `latestActivePackage`: 현재 활성 앱 추적
+  - `lastHomeNavigationPackage`, `lastHomeNavigationTime`: 쿨다운 메커니즘
+  - 여러 스레드(`onAccessibilityEvent` 메인 스레드, `collectLatest` Default 스레드, `hideOverlay`/`showOverlay` Main 스레드)에서 접근하므로 가시성 보장 필수
+- **체크 순서 최적화**: `handleAppLaunch()`에서 오버레이 상태 → Grace Period → Cool-down 순서로 체크
+- **예외 처리 강화**: try-catch-finally로 상태 머신 데드락 방지 (항상 IDLE로 복귀)
 
 **관련 컴포넌트**:
 - `AppBlockingService`: 오버레이 트리거 및 중복 방지
@@ -360,12 +392,18 @@ sequenceDiagram
 **처리 로직**:
 - `PenaltyService.applyQuitPenalty(packageName, appName)` 호출
 - Free/Standard 티어: 3 WP 차감
-- `AppBlockingService.hideOverlay(shouldGoHome = true)` 호출하여 오버레이 닫기 및 홈으로 이동
+- `AppBlockingService.hideOverlay(shouldGoHome = true, applyCooldown = false)` 호출하여 오버레이 닫기 및 홈으로 이동
+  - `applyCooldown=false`로 쿨다운 면제 및 쿨다운 변수 리셋
+- **홈 런처 감지**: `handleAppLaunch()`에서 홈 런처 패키지가 감지되면 상태를 `ALLOWED`로 전이
+  - 서비스 시작 시 `initializeHomeLauncherPackages()`로 홈 런처 패키지 목록 초기화
+  - `PackageManager.queryIntentActivities()`로 `CATEGORY_HOME` Intent를 처리할 수 있는 모든 앱을 찾아 저장
+  - `onAccessibilityEvent()`에서 홈 런처 패키지는 className 필터링을 우회하여 Flow로 전송 보장
+  - 홈 화면 이벤트가 실제로 발생했을 때만 상태를 `ALLOWED`로 전이하여 중복 호출 방지
 
 **관련 컴포넌트**:
 - `GuiltyNegotiationOverlay`: 사용자 인터랙션 처리
 - `PenaltyService`: 페널티 계산 및 적용 (3 WP 차감)
-- `AppBlockingService`: 오버레이 닫기 및 홈 이동
+- `AppBlockingService`: 오버레이 닫기, 홈 이동, 강제 상태 초기화
 
 #### 3. executePersonaFeedback (Persona 피드백 실행)
 
@@ -596,7 +634,7 @@ sequenceDiagram
 
 ### 핵심 원칙
 
-1. **오버레이 실행 조건**: 시스템이 'ALLOWED' 상태에서 'BLOCKED' 상태로 변경되는 시점에만 단 1회 실행합니다. 이미 'BLOCKED' 상태인 경우(예: 화면을 다시 켰을 때)에는 오버레이를 다시 띄우지 않습니다.
+1. **오버레이 실행 조건**: 시스템이 'ALLOWED' 상태에서 'BLOCKED' 상태로 변경되는 시점에 오버레이를 실행합니다. 이미 'BLOCKED' 상태인 경우에도 오버레이가 표시되지 않은 상태이고 조건을 만족하면 오버레이를 표시합니다. (예: 오디오 종료 후 차단 앱 재실행 시)
 
 2. **이벤트 기반 오디오 감지**: `AudioManager.AudioPlaybackCallback`을 사용하여 오디오 상태 변화를 감지합니다. 고정된 주기적 검사 대신, 오디오 세션의 시작/종료 이벤트가 발생할 때만 상태를 업데이트합니다.
 
@@ -662,6 +700,32 @@ ALLOWED → BLOCKED 전이
 유죄협상 오버레이 정상 작동 ✅
 ```
 
+#### 오디오 종료 후 차단 앱 재실행 시나리오
+
+```
+차단 앱 실행 → 오버레이 표시 → 철회 버튼 클릭
+  ↓
+상태: BLOCKED 유지 (홈 이동)
+  ↓
+오디오 재생 시작
+  ↓
+BLOCKED → BLOCKED (상태 변경 없음, 오디오로 인한 차단)
+  ↓
+오디오 종료
+  ↓
+BLOCKED → ALLOWED 전이
+  ↓
+채굴 재개
+  ↓
+같은 차단 앱 재실행
+  ↓
+ALLOWED → BLOCKED 전이 또는 BLOCKED → BLOCKED (오버레이 없음)
+  ↓
+오버레이 표시 조건 충족 (triggerOverlay=true, currentOverlay=null)
+  ↓
+유죄협상 오버레이 정상 작동 ✅
+```
+
 #### 화면 OFF 시 차단 앱 오디오 재생 기록 시나리오
 
 ```
@@ -689,6 +753,7 @@ checkBlockedAppAudioFromConfigs()에서 플래그 리셋
 - **상태 정의**: [`AppBlockingService.MiningState`](app/src/main/java/com/faust/services/AppBlockingService.kt)
 - **상태 전이 로직**: [`AppBlockingService.transitionToState()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
   - ALLOWED 전이 시 `PreferenceManager.wasAudioBlockedOnScreenOff()` 확인하여 조건부 재개
+  - BLOCKED 전이 시 상태 변경 여부와 관계없이 오버레이가 없고 조건을 만족하면 오버레이 표시 (오디오 종료 후 차단 앱 재실행 시나리오 대응)
 - **오디오 상태 변경 처리**: [`AppBlockingService.onAudioBlockStateChanged()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
 - **콜백 등록**: [`PointMiningService.setBlockingServiceCallback()`](app/src/main/java/com/faust/services/PointMiningService.kt)
 - **화면 OFF 시 오디오 상태 기록**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt)

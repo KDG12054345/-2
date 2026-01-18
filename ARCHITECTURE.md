@@ -630,6 +630,196 @@ MainActivity
   - Grace Period 활성화 시 오버레이만 표시하지 않으며, 채굴 중단 및 상태 전이는 정상 작동
   - 다른 검사 로직(Cool-down, 오디오 차단 등) 및 포인트 채굴 재개 로직에 영향 없음
 
+### [2026-01-XX] 철회 버튼 클릭 후 빠른 앱 재실행 시 유죄협상 미호출 문제 해결
+- **작업**: 철회 버튼 클릭 후 빠르게 차단 앱을 실행했을 때 유죄협상이 호출되지 않는 현상 해결
+- **원인 분석**:
+  - 참조 불일치: `hideOverlay()`가 비동기로 실행되어 `currentOverlay = null` 설정이 지연됨
+  - 재생성 방해: `handleAppLaunch()`에서 `currentOverlay != null`만 체크하여 닫는 중 상태를 고려하지 않음
+  - 이벤트 지연: 비동기 작업 완료 전 재실행 시 타이밍 이슈 발생
+- **컴포넌트 영향**: 
+  - `AppBlockingService.hideOverlay()`: 참조 백업 후 즉시 상태 동기화
+  - `AppBlockingService.handleAppLaunch()`: `isOverlayDismissing` 체크 추가
+- **변경 사항**:
+  - `hideOverlay()`에서 오버레이 참조를 백업한 후 즉시 `currentOverlay = null`, `isOverlayDismissing = true` 설정
+  - 비동기 블록에서 백업한 참조로 `dismiss()` 호출하여 리소스 정리 보장
+  - `handleAppLaunch()`에서 `currentOverlay != null || isOverlayDismissing` 체크로 `showOverlay()`와 동일한 조건 통일
+  - 상태 동기화를 즉시 수행하여 빠른 재실행 시나리오에서도 정상 작동
+- **영향 범위**:
+  - 철회 버튼 클릭 후 빠르게 앱을 재실행해도 유죄협상이 정상 호출됨
+  - PersonaEngine 오디오 정지 로직 보존: `isOverlayActive`는 기존 로직대로 PersonaEngine 오디오 정지 완료 후 해제
+  - 리소스 정리 보장: 백업한 참조로 `dismiss()` 정상 호출하여 메모리 누수 방지
+  - 기존 로직 보존: Cool-down, Grace Period, 중복 방지 메커니즘 모두 유지
+
+### [2026-01-XX] Cool-down 및 중복 호출 방지 로직 최적화
+- **작업**: 철회 버튼 클릭 후 빠른 앱 재실행 시 Cool-down과 중복 호출 방지 로직에 의해 오버레이가 차단되는 문제 해결
+- **원인 분석**:
+  - Cool-down 로직: 철회 버튼 클릭 시 `navigateToHome()`에서 1초 쿨다운 설정하여 의도적 재실행도 차단
+  - 중복 호출 방지 로직: 500ms 내 동일 패키지 재호출 차단으로 빠른 재실행 시나리오에서 문제 발생
+  - 체크 순서 문제: 중복 호출 방지가 먼저 실행되어 중요한 체크(Grace Period, Cool-down)보다 우선 적용
+- **컴포넌트 영향**: 
+  - `AppBlockingService.navigateToHome()`: `applyCooldown` 파라미터 추가
+  - `AppBlockingService.hideOverlay()`: `applyCooldown` 파라미터 추가
+  - `GuiltyNegotiationOverlay.onCancel()`: `applyCooldown=false` 전달
+  - `AppBlockingService.handleAppLaunch()`: 체크 순서 재배치 및 중복 호출 방지 시간 단축
+- **변경 사항**:
+  - `navigateToHome()`에 `applyCooldown` 파라미터 추가 (기본값: true)
+  - `hideOverlay()`에 `applyCooldown` 파라미터 추가 (기본값: true)
+  - `GuiltyNegotiationOverlay.onCancel()`에서 `hideOverlay(shouldGoHome=true, applyCooldown=false)` 호출
+  - 철회 버튼 클릭 시 쿨다운 면제하여 의도적 재실행 허용
+  - `HANDLE_APP_LAUNCH_DEBOUNCE_MS`를 500ms → 200ms로 단축
+  - `handleAppLaunch()` 체크 순서 재배치: 오버레이 상태 → Grace Period → Cool-down → 중복 호출 방지
+  - 중요한 체크를 먼저 수행하고, 중복 호출 방지는 마지막에 적용하여 빠른 재실행 허용
+- **영향 범위**:
+  - 철회 버튼 클릭 후 빠르게 앱을 재실행해도 쿨다운 없이 즉시 오버레이 표시
+  - 화면 OFF 도주 감지 시에는 기존대로 쿨다운 적용 (의도적 재실행이 아님)
+  - 시스템 이벤트 중복은 여전히 차단 (200ms 내 중복 호출 방지)
+  - 실수로 다시 실행하는 경우는 쿨다운으로 보호 (자연스러운 홈 이동 시)
+  - 기존 로직 보존: Grace Period, Cool-down(자연스러운 홈 이동 시), 중복 방지 메커니즘 모두 유지
+
+### [2026-01-XX] Window ID 검사 + 상태 머신 패턴으로 중복 호출 문제 근본 해결
+- **작업**: 시스템 이벤트 중복과 사용자 의도적 재실행을 구분할 수 없는 근본 문제 해결
+- **원인 분석**:
+  - 시간 기반 디바운싱의 한계: 시스템 이벤트 중복과 사용자 의도적 재실행을 구분 불가
+  - 상태 동기화 문제: `isOverlayDismissing` 플래그로 인한 빠른 재실행 차단
+  - 참조 불일치: 오버레이 닫힘 완료 시점 불명확
+- **컴포넌트 영향**: 
+  - `AppBlockingService.onAccessibilityEvent()`: Window ID 검사 + 코루틴 Throttling 추가
+  - `AppBlockingService`: `OverlayState` enum 추가 (상태 머신 패턴)
+  - `AppBlockingService.showOverlay()`: 상태 머신 기반으로 수정
+  - `AppBlockingService.hideOverlay()`: 상태 머신 기반으로 수정
+  - `GuiltyNegotiationOverlay`: `OverlayDismissCallback` 인터페이스 추가
+- **변경 사항**:
+  - **Window ID 검사**: `event.windowId`로 실제 창 전환만 감지 (화면 내부 변화 제외)
+  - **클래스 이름 검증**: `event.className`으로 Activity/Dialog만 처리 (Toast, Notification 제외)
+  - **코루틴 Throttling**: 300ms 지연으로 연속 이벤트를 마지막 것만 처리
+  - **상태 머신 패턴**: `OverlayState` enum (IDLE, SHOWING, DISMISSING)으로 오버레이 생명주기 관리
+  - **콜백 패턴 강화**: `OverlayDismissCallback`으로 오버레이 닫힘 완료 시점 명확화
+  - **상태 전이 제어**: DISMISSING 상태일 때는 어떤 앱 실행 이벤트도 무시
+  - **예외 처리 강화**: try-catch-finally로 상태 머신 데드락 방지
+- **영향 범위**:
+  - 시스템 이벤트 중복 완전 차단: Window ID로 실제 창 전환만 감지
+  - 빠른 재실행 시나리오 정상 작동: 상태 머신으로 DISMISSING 중 재생성 차단
+  - 상태 동기화 문제 해결: 상태 머신으로 명확한 상태 전이 관리
+  - 철회 후 즉시 재실행 정상 작동: DISMISSING → IDLE 전이 후 즉시 허용
+  - 기존 로직 보존: Grace Period, Cool-down, PersonaEngine 오디오 정지 로직 모두 유지
+  - 시간 기반 중복 호출 방지 로직 제거: Window ID + Throttling이 주 방어선
+
+### [2026-01-XX] Window ID 기억 리셋 및 특별 처리로 재진입 차단 문제 해결
+- **작업**: Window ID가 -1(UNDEFINED)인 경우 오버레이 닫힘 후에도 재진입이 차단되는 문제 해결
+- **원인 분석**:
+  - Window ID 기억 유지: 오버레이가 닫혀도 `lastWindowId`와 `lastProcessedPackage`가 리셋되지 않음
+  - Window ID -1 문제: 일부 앱(유튜브 등)이 Window ID를 -1로 보고하여 같은 패키지 재실행 시 계속 무시됨
+  - className 필터 엄격: `FrameLayout` 등 일반 뷰로 이벤트 발생 시 무시되어 실제 창 전환도 처리되지 않음
+- **컴포넌트 영향**: 
+  - `AppBlockingService.onAccessibilityEvent()`: Window ID -1 특별 처리 및 className 필터 완화
+  - `AppBlockingService.hideOverlay()`: Window ID 기억 리셋 추가
+- **변경 사항**:
+  - **Window ID 기억 리셋**: `hideOverlay()`에서 오버레이 닫힘 완료 시 `lastWindowId=-1`, `lastProcessedPackage=null`로 리셋
+  - **Window ID -1 특별 처리**: Window ID가 -1인 경우 오버레이 상태를 확인하여 IDLE 상태면 처리 허용
+  - **className 필터 완화**: Window ID가 유효한 경우 `Layout` 클래스도 허용 (FrameLayout, LinearLayout 등)
+  - **조건부 필터링**: Window ID가 -1이면 Activity/Dialog만 허용 (더 엄격), 유효하면 Layout도 허용 (더 관대)
+- **영향 범위**:
+  - Window ID -1 앱에서도 오버레이 닫힘 후 재진입 정상 작동
+  - FrameLayout 등 일반 뷰로 이벤트 발생하는 앱에서도 오버레이 정상 표시
+  - 오버레이 닫힘 시 Window ID 기억이 리셋되어 빠른 재실행 시나리오 정상 작동
+  - 기존 로직 보존: Window ID 검사, Throttling, 상태 머신 패턴 모두 유지
+
+### [2026-01-XX] 상태 전이 즉시화로 빠른 재실행 문제 근본 해결
+- **작업**: 오버레이 닫힘 후 빠른 재실행 시 상태 전이 지연과 Throttling 지연의 누적으로 인한 차단 문제 해결
+- **원인 분석**:
+  - 상태 전이 지연: `hideOverlay()`에서 `overlayState = IDLE` 전환이 비동기 블록의 여러 delay 후에 발생 (총 약 400ms)
+  - Throttling 지연: `onAccessibilityEvent()`에서 300ms 지연으로 연속 이벤트 처리
+  - 누적 차단 시간: 최대 약 700ms 동안 재진입 차단
+  - className 필터 엄격: Window ID가 -1일 때 Layout을 제외하여 FrameLayout 이벤트 무시
+- **컴포넌트 영향**: 
+  - `AppBlockingService.hideOverlay()`: 상태 전이 즉시화 및 Window ID 기억 즉시 리셋
+  - `AppBlockingService.onAccessibilityEvent()`: className 필터 완화 (Layout 항상 허용)
+- **변경 사항**:
+  - **상태 전이 즉시화**: `hideOverlay()`에서 `overlayState = IDLE`을 즉시 설정 (비동기 작업 완료 대기하지 않음)
+  - **Window ID 기억 즉시 리셋**: `lastWindowId=-1`, `lastProcessedPackage=null`을 즉시 리셋하여 재진입 허용
+  - **중복 호출 체크 제거**: `overlayState == DISMISSING` 체크 제거 (즉시 IDLE로 전환하므로 불필요)
+  - **className 필터 완화**: Layout을 항상 허용 (Window ID와 무관하게 FrameLayout, LinearLayout 등 처리)
+  - **리소스 정리 분리**: 오버레이 닫기 로직은 비동기 블록에서 리소스 정리만 수행 (상태는 이미 IDLE)
+- **영향 범위**:
+  - 오버레이 닫힘 후 즉시 재진입 허용 (상태 전이 지연 제거)
+  - FrameLayout 이벤트 정상 처리 (유튜브 등에서 정상 작동)
+  - 빠른 재실행 시나리오에서도 정상 작동 (Throttling 지연만 존재, 상태 전이 지연 없음)
+  - 기존 로직 보존: PersonaEngine 오디오 정지 로직, 홈 이동 지연 로직 모두 유지
+  - 리소스 정리 보장: 백업한 참조로 `dismiss()` 호출하여 리소스 정리 보장
+
+### [2026-01-XX] 홈 런처 감지로 홈 이동 후 상태 동기화 보장 (강제 상태 초기화 제거)
+- **작업**: 홈으로 이동할 때 홈 런처 패키지를 감지하여 상태를 `ALLOWED`로 전이하도록 변경 (강제 상태 초기화 제거)
+- **원인 분석**:
+  - 강제 상태 초기화의 타이밍 문제: `navigateToHome()` 직후 즉시 상태 전이로 인해 홈 이동이 완료되기 전에 유튜브 앱이 여전히 활성 상태
+  - 중복 호출: 홈 이동 완료 전에 유튜브 앱이 다시 감지되어 `ALLOWED → BLOCKED` 전이 및 오버레이 재표시
+  - 홈 런처 패키지 불확실성: 런처마다 패키지명이 다르고, 이벤트가 발생하지 않을 수 있음
+- **컴포넌트 영향**: 
+  - `AppBlockingService.hideOverlay()`: 강제 상태 초기화 로직 제거
+  - `AppBlockingService`: 홈 런처 패키지 목록 초기화 및 감지 로직 추가
+  - `AppBlockingService.handleAppLaunch()`: 홈 런처 감지 로직 추가
+- **변경 사항**:
+  - **강제 상태 초기화 제거**: `hideOverlay()`에서 `navigateToHome()` 호출 직후 상태 전이 제거
+  - **홈 런처 패키지 초기화**: `initializeHomeLauncherPackages()` 추가 - `PackageManager.queryIntentActivities()`로 `CATEGORY_HOME` Intent를 처리할 수 있는 모든 앱을 찾아 저장
+  - **홈 런처 이벤트 필터링 우회**: `onAccessibilityEvent()`에서 홈 런처 패키지는 className 필터링을 우회하여 Flow로 전송 보장 (런처마다 className이 다를 수 있음)
+  - **홈 런처 감지**: `handleAppLaunch()`에서 홈 런처 패키지가 감지되면 상태를 `ALLOWED`로 전이
+  - 홈 화면 이벤트가 실제로 발생했을 때만 상태를 전이하여 중복 호출 방지
+  - 홈 화면 이벤트가 지연되거나 누락되어도 홈 런처 감지로 상태가 올바르게 유지됨
+- **영향 범위**:
+  - 홈 이동 후 홈 런처가 실제로 감지되었을 때만 상태가 `ALLOWED`로 전이되어 중복 호출 방지
+  - 홈 이동 완료 전 유튜브 앱 재감지 문제 해결
+  - 이벤트 지연/누락 시나리오에서도 홈 런처 감지로 상태 일관성 유지
+  - 기존 로직 보존: `transitionToState()`의 중복 전이 방지 및 오디오 상태 확인 로직 모두 유지
+- **추가 수정 (2026-01-XX)**: 같은 제한 앱 반복 실행 시나리오 대응
+  - **문제**: 같은 제한 앱을 반복 실행(a실행 → 철회 → a실행 → 철회 → a실행) 시 Window ID 중복 체크로 이벤트가 Flow로 전송되지 않아 유죄협상이 호출되지 않음
+  - **해결**: Window ID 중복 체크 완화 - 오버레이가 닫힌 후(IDLE)에는 같은 앱 재실행 허용
+  - **방어막 유지**: 기존 방어막(Grace Period, Cool-down)이 `handleAppLaunch()`에서 정상 작동하여 중복 호출 방지
+  - **결과**: 짧은 시간 내 반복 실행해도 유죄협상이 정상 호출됨 (철회 시 `applyCooldown=false`로 쿨다운 면제)
+- **추가 수정 (2026-01-XX)**: 홈 런처에서 다른 앱으로 빠르게 전환하는 경우 불일치 체크 우회
+  - **문제**: 홈 이동 후 빠르게 제한 앱 실행 시 `latestActivePackage` 불일치로 이벤트가 무시됨
+  - **해결**: 홈 런처에서 다른 앱으로 전환하는 경우는 불일치 체크를 우회하여 제한 앱 이벤트 처리 보장
+- **추가 수정 (2026-01-18)**: 쿨다운 변수 스레드 안전성 및 정합성 개선
+  - **문제**: 철회 버튼 클릭 후 같은 차단 앱 재실행 시 오버레이가 표시되지 않음
+    - 쿨다운 변수(`lastHomeNavigationPackage`, `lastHomeNavigationTime`)가 `@Volatile` 없이 선언되어 스레드 안전성 문제
+    - `applyCooldown=false`일 때 쿨다운 변수가 리셋되지 않아 이전 값이 남아있음
+  - **해결**:
+    - 쿨다운 변수에 `@Volatile` 어노테이션 추가로 스레드 안전성 보장
+    - `navigateToHome()`에서 `applyCooldown=false`일 때 쿨다운 변수를 명시적으로 리셋
+    - 쿨다운 체크 로직에 상세 로그 추가 (경과 시간, 쿨다운 만료 여부)
+  - **영향 범위**:
+    - 철회 버튼 클릭 후 같은 차단 앱 재실행 시 오버레이가 정상적으로 표시됨
+    - 다중 스레드 환경에서 쿨다운 변수 접근 시 가시성 보장
+    - 디버깅 용이성 향상 (상세 로그)
+- **추가 수정 (2026-01-18)**: 오버레이 FrameLayout 이벤트 필터링
+  - **문제**: 오버레이가 표시된 후 FrameLayout 이벤트가 Flow로 전송되어 불필요한 체크 발생
+    - 오버레이의 FrameLayout이 `TYPE_WINDOW_STATE_CHANGED` 이벤트를 발생시켜 Flow로 전송됨
+    - debounce 후 처리 시 `currentOverlay != null`이어서 "오버레이 이미 표시 중" 로그 발생
+  - **해결**:
+    - `onAccessibilityEvent()`에서 오버레이 패키지(`com.faust`)의 FrameLayout 이벤트를 사전 필터링
+    - 필터링 1과 2 사이에 오버레이 패키지 필터링 추가
+  - **영향 범위**:
+    - 오버레이 표시 후 불필요한 이벤트 처리 제거
+    - Flow 처리 부하 감소
+    - 로그 노이즈 감소
+- **추가 수정 (2026-01-18)**: 스레드 안전성 개선 - 공유 변수에 @Volatile 추가
+  - **문제**: 여러 스레드에서 접근하는 공유 변수에 `@Volatile`이 없어 가시성 문제 발생 가능
+    - `onAccessibilityEvent()`는 메인 스레드에서 실행
+    - `hideOverlay()`, `showOverlay()`는 `Dispatchers.Main`에서 실행
+    - `collectLatest`, `handleAppLaunch()`는 `Dispatchers.Default`에서 실행
+    - 엄격 모드 빌드에서 가시성 문제로 인한 중복 호출 가능
+  - **해결**:
+    - 모든 공유 변수에 `@Volatile` 어노테이션 추가
+      - `currentOverlay`: 오버레이 인스턴스 참조
+      - `lastWindowId`, `lastProcessedPackage`: Window ID 기반 중복 호출 방지
+      - `lastAllowedPackage`: Grace Period 체크
+      - `currentBlockedPackage`, `currentBlockedAppName`: 현재 협상 중인 앱 정보
+    - 기존 `@Volatile` 변수와 일관성 유지
+      - `overlayState`, `latestActivePackage`, `lastHomeNavigationPackage`, `lastHomeNavigationTime`
+  - **영향 범위**:
+    - 유죄협상 중복 호출 방지 메커니즘의 정합성 보장
+    - 멀티스레드 환경에서 변수 가시성 보장
+    - 엄격 모드 빌드에서도 안전하게 동작
+    - 경쟁 조건으로 인한 중복 오버레이 표시 방지
+
 ---
 
 ## 결론

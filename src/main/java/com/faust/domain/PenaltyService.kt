@@ -41,9 +41,11 @@ class PenaltyService(private val context: Context) {
      * 역할: 앱 강행 실행 시 페널티를 적용합니다. 모든 티어는 6 WP를 차감합니다.
      * 트리거: GuiltyNegotiationOverlay.onProceed() 호출
      * 처리: 사용자 티어에 따라 페널티 계산, applyPenalty() 호출 (즉시 완료 대기)
+     * 
+     * @return 패널티 적용 성공 여부 (true: 성공, false: 실패)
      */
-    suspend fun applyLaunchPenalty(packageName: String, appName: String) {
-        withContext(Dispatchers.IO) {
+    suspend fun applyLaunchPenalty(packageName: String, appName: String): Boolean {
+        return withContext(Dispatchers.IO) {
             val userTier = preferenceManager.getUserTier()
             val penalty = when (userTier) {
                 UserTier.FREE -> LAUNCH_PENALTY
@@ -61,9 +63,11 @@ class PenaltyService(private val context: Context) {
      * 역할: 앱 철회 시 페널티를 적용합니다. Free 티어는 3 WP, Standard 티어는 3 WP를 차감합니다.
      * 트리거: GuiltyNegotiationOverlay.onCancel() 호출
      * 처리: 사용자 티어에 따라 페널티 계산, applyPenalty() 호출 (페널티 > 0인 경우만, 즉시 완료 대기)
+     * 
+     * @return 패널티 적용 성공 여부 (true: 성공, false: 실패 또는 포인트 부족)
      */
-    suspend fun applyQuitPenalty(packageName: String, appName: String) {
-        withContext(Dispatchers.IO) {
+    suspend fun applyQuitPenalty(packageName: String, appName: String): Boolean {
+        return withContext(Dispatchers.IO) {
             val userTier = preferenceManager.getUserTier()
             val penalty = when (userTier) {
                 UserTier.FREE -> FREE_TIER_QUIT_PENALTY
@@ -76,6 +80,7 @@ class PenaltyService(private val context: Context) {
                 applyPenalty(penalty, "앱 철회: $appName")
             } else {
                 Log.d(TAG, "철회 버튼 클릭: 포인트 차감 없음 (티어: ${userTier.name})")
+                true // FAUST_PRO는 항상 성공으로 간주
             }
         }
     }
@@ -86,11 +91,14 @@ class PenaltyService(private val context: Context) {
      * 역할: 페널티를 적용합니다. DB 트랜잭션으로 포인트 차감과 거래 내역 저장을 원자적으로 처리합니다.
      * 트리거: applyLaunchPenalty() 또는 applyQuitPenalty() 호출
      * 처리: 현재 포인트 조회, 페널티 계산 및 차감, 거래 내역 저장, PreferenceManager 동기화 (트랜잭션 보장)
+     * 
+     * @return 패널티 적용 성공 여부 (true: 성공, false: 실패 또는 포인트 부족)
      */
-    private suspend fun applyPenalty(penalty: Int, reason: String) {
-        if (penalty <= 0) return
+    private suspend fun applyPenalty(penalty: Int, reason: String): Boolean {
+        if (penalty <= 0) return true
 
         try {
+            var penaltyApplied = false
             database.withTransaction {
                 try {
                     // 현재 포인트 조회 (DB에서 계산, 0 이상 보장)
@@ -103,6 +111,7 @@ class PenaltyService(private val context: Context) {
                     
                     if (actualPenalty <= 0) {
                         Log.d(TAG, "포인트 부족으로 패널티 적용 불가: 요청 ${penalty} WP, 현재 ${currentPoints} WP")
+                        penaltyApplied = false
                         return@withTransaction
                     }
                     
@@ -120,14 +129,18 @@ class PenaltyService(private val context: Context) {
                     preferenceManager.setCurrentPoints(newPoints)
                     
                     Log.w(TAG, "포인트 차감 완료: ${actualPenalty} WP 차감 (기존: ${currentPoints} WP → 현재: ${newPoints} WP), 사유: $reason")
+                    penaltyApplied = true
                 } catch (e: Exception) {
                     Log.e(TAG, "Error applying penalty in transaction: penalty=$penalty, reason=$reason", e)
+                    penaltyApplied = false
                     throw e // 트랜잭션 롤백을 위해 예외 재발생
                 }
             }
+            return penaltyApplied
         } catch (e: Exception) {
             Log.e(TAG, "Failed to apply penalty: penalty=$penalty, reason=$reason", e)
             // 트랜잭션이 실패하면 자동으로 롤백됨
+            return false
         }
     }
 }
