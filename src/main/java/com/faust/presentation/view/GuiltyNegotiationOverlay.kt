@@ -29,7 +29,6 @@ import com.faust.domain.persona.handlers.HapticHandlerImpl
 import com.faust.domain.persona.handlers.VisualHandler
 import com.faust.domain.persona.handlers.VisualHandlerImpl
 import com.faust.services.AppBlockingService
-import com.faust.services.PointMiningService
 import kotlinx.coroutines.*
 
 /**
@@ -234,24 +233,22 @@ class GuiltyNegotiationOverlay(
 
     /**
      * [핵심 수정] 강행 처리
-     * 서비스를 통해 종료 요청을 보내 중복 차감을 방지합니다.
+     * PenaltyService 경유로 패널티 적용 후 오버레이 닫기.
      */
     private fun onProceed() {
+        if (isUserActionCompleted) {
+            Log.d(TAG, "onProceed: 이미 처리 완료, 중복 호출 무시")
+            return
+        }
         Log.d(TAG, "User clicked proceed button")
-
         personaEngine.stopAll()
         isUserActionCompleted = true
-
-        // 허용 패키지 등록
         (context as? AppBlockingService)?.setAllowedPackage(packageName)
 
-        // 벌금 6 WP 부과
-        Log.w(TAG, "강행 버튼 클릭: 6 WP 차감")
-        PointMiningService.applyOneTimePenalty(context, 6)
-
-        // [핵심] 서비스에게 오버레이 닫기 요청 (홈 이동 X)
-        // shouldGoHome = false -> 오버레이만 닫고 앱 계속 사용
-        (context as? AppBlockingService)?.hideOverlay(shouldGoHome = false)
+        coroutineScope.launch {
+            penaltyService.applyLaunchPenalty(packageName, appName)
+            (context as? AppBlockingService)?.hideOverlay(shouldGoHome = false)
+        }
     }
 
     /**
@@ -259,8 +256,11 @@ class GuiltyNegotiationOverlay(
      * 서비스를 통해 확실하게 홈 화면으로 이동합니다.
      */
     private fun onCancel() {
+        if (isUserActionCompleted) {
+            Log.d(TAG, "onCancel: 이미 처리 완료, 중복 호출 무시")
+            return
+        }
         Log.d(TAG, "User clicked cancel button")
-
         personaEngine.stopAll()
         isUserActionCompleted = true
 

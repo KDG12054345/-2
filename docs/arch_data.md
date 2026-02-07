@@ -13,10 +13,18 @@ Data Layer는 데이터 영속성과 저장소 관리를 담당합니다. Room D
 ```mermaid
 erDiagram
     BlockedApp ||--o{ PointTransaction : "triggers"
+    BlockedDomain ||--o{ PointTransaction : "triggers"
+    AppGroup ||--o{ BlockedApp : "groups"
     
     BlockedApp {
         string packageName PK
         string appName
+        long blockedAt
+    }
+    
+    BlockedDomain {
+        string domain PK
+        string displayName
         long blockedAt
     }
     
@@ -26,6 +34,12 @@ erDiagram
         TransactionType type
         long timestamp
         string reason
+    }
+    
+    AppGroup {
+        string packageName PK
+        AppGroupType groupType PK
+        boolean isIncluded
     }
     
     UserTier {
@@ -51,9 +65,25 @@ erDiagram
 |--------|------|----------|------|
 | id | Long | PRIMARY KEY, AUTO_INCREMENT | 거래 ID |
 | amount | Int | NOT NULL | 포인트 양 (음수 가능) |
-| type | TransactionType | NOT NULL | 거래 타입 (MINING, PENALTY, RESET) |
+| type | TransactionType | NOT NULL | 거래 타입 (MINING, PENALTY, PURCHASE, RESET) |
 | timestamp | Long | NOT NULL | 거래 시간 |
 | reason | String | | 거래 사유 |
+
+#### app_groups
+
+| 컬럼명 | 타입 | 제약조건 | 설명 |
+|--------|------|----------|------|
+| packageName | String | PRIMARY KEY | 앱 패키지명 |
+| groupType | AppGroupType | PRIMARY KEY | 그룹 타입 (SNS, OTT) |
+| isIncluded | Boolean | NOT NULL, DEFAULT true | 포함 여부 (true: 포함, false: 제외) |
+
+#### blocked_domains
+
+| 컬럼명 | 타입 | 제약조건 | 설명 |
+|--------|------|----------|------|
+| domain | String | PRIMARY KEY | 정규화된 도메인 (예: youtube.com) |
+| displayName | String | | 표시용 이름 (선택) |
+| blockedAt | Long | NOT NULL, DEFAULT 0 | 차단 추가 시간 (timestamp) |
 
 ---
 
@@ -63,9 +93,13 @@ erDiagram
 
 **파일**: [`app/src/main/java/com/faust/data/database/FaustDatabase.kt`](app/src/main/java/com/faust/data/database/FaustDatabase.kt)
 
-- **엔티티**: `BlockedApp`, `PointTransaction`
-- **DAO**: `AppBlockDao`, `PointTransactionDao`
-- **버전**: 1
+- **엔티티**: `BlockedApp`, `PointTransaction`, `AppGroup`, `BlockedDomain`
+- **DAO**: `AppBlockDao`, `PointTransactionDao`, `AppGroupDao`, `BlockedDomainDao`
+- **버전**: 4
+- **Migration**: 
+  - 버전 1 → 2: `free_pass_items`, `daily_usage_records`, `app_groups` 테이블 추가
+  - 버전 2 → 3: `blocked_domains` 테이블 추가 (URL 차단용)
+  - 버전 3 → 4: `free_pass_items`, `daily_usage_records` 테이블 제거 (MIGRATION_3_4)
 - **포인트 관리**: 
   - 현재 포인트는 `PointTransaction`의 `SUM(amount)`로 계산
   - `PointTransactionDao.getTotalPointsFlow()`로 Flow 제공
@@ -88,6 +122,30 @@ erDiagram
   - `getAllBlockedApps()`: 모든 차단 앱 목록 Flow
   - `insertBlockedApp()`: 차단 앱 추가
   - `deleteBlockedApp()`: 차단 앱 제거
+
+### 4. AppGroupDao
+
+**파일**: [`app/src/main/java/com/faust/data/database/AppGroupDao.kt`](app/src/main/java/com/faust/data/database/AppGroupDao.kt)
+
+- **주요 메서드**:
+  - `getAllGroups()`: 모든 앱 그룹 Flow
+  - `getGroupsByType(groupType)`: 특정 그룹 타입의 모든 앱 Flow
+  - `isAppInGroup(packageName, groupType)`: 앱이 특정 그룹에 속하는지 확인
+  - `insertOrUpdateGroup()`: 앱 그룹 삽입 또는 업데이트
+
+### 5. BlockedDomainDao
+
+**파일**: [`app/src/main/java/com/faust/data/database/BlockedDomainDao.kt`](app/src/main/java/com/faust/data/database/BlockedDomainDao.kt)
+
+- **역할**: URL(도메인) 차단 목록 관리
+- **주요 메서드**:
+  - `getAllBlockedDomains()`: 모든 차단 도메인 Flow
+  - `getBlockedDomain(domain)`: 특정 도메인 조회 (suspend)
+  - `isBlocked(domain)`: 도메인이 차단되었는지 빠른 체크
+  - `insertBlockedDomain()`: 차단 도메인 추가 (중복 무시)
+  - `insertOrUpdateBlockedDomain()`: 추가 또는 업데이트
+  - `deleteBlockedDomainByDomain()`: 도메인으로 차단 해제
+  - `getBlockedDomainCount()`: 차단 도메인 수
 
 ---
 
@@ -123,6 +181,11 @@ erDiagram
 | is_service_running | Boolean | false | 서비스 실행 상태 |
 | persona_type | String | "" | 페르소나 타입 (STREET, CALM, DIPLOMATIC, COMFORTABLE) |
 | wasAudioBlockedOnScreenOff | Boolean | false | 화면 OFF 시 차단 앱 오디오 재생 상태 |
+| custom_daily_reset_time | String | "00:00" | 사용자 지정 일일 리셋 시간 (HH:mm 형식) |
+| time_credit_balance_seconds | Long | 0 | 시간 크레딧 잔액 (초 단위, reward loss 방지) |
+| accumulated_abstention_seconds | Long | 0 | 누적 절제 시간 (초 단위) |
+| user_type | String | "Light" | 사용자 타입 (Light, Pro, Detox) |
+| (deprecated) time_credit_cooldown_* | Long/Int | 0 | 타임 크레딧 소진 시 10분 쿨타임 기능 제거로 미사용 |
 
 ### 보안 특징
 
@@ -175,23 +238,13 @@ erDiagram
    }
    ```
 
-2. **PointMiningService**
+2. **TimeCreditBackgroundService**
+   - Time Credit 잔액·누적 절제 시간(초)은 PreferenceManager만 사용 (DB 트랜잭션 없음).
+   - 차단 앱 오디오 감지를 위해 `database.appBlockDao()` 읽기만 사용.
    ```kotlin
-   try {
-       database.withTransaction {
-           try {
-               database.pointTransactionDao().insertTransaction(...)
-               val currentPoints = database.pointTransactionDao().getTotalPoints() ?: 0
-               preferenceManager.setCurrentPoints(currentPoints) // 동기화
-           } catch (e: Exception) {
-               Log.e(TAG, "Error in transaction", e)
-               throw e // 롤백을 위해 예외 재발생
-           }
-       }
-   } catch (e: Exception) {
-       Log.e(TAG, "Transaction failed", e)
-       // 자동 롤백됨
-   }
+   // 누적/차감 예시 (트랜잭션 없음, 초 단위)
+   preferenceManager.setAccumulatedAbstentionSeconds(prevSeconds + secondsToApply)
+   preferenceManager.setTimeCreditBalanceSeconds(balanceSeconds - deductSeconds)
    ```
 
 3. **WeeklyResetService**

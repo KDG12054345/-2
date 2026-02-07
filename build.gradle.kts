@@ -47,6 +47,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.activity:activity-ktx:1.8.2")
+    implementation("androidx.fragment:fragment-ktx:1.8.5")
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.cardview:cardview:1.0.0")
@@ -63,10 +64,14 @@ dependencies {
     // WorkManager
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 
+    // ViewPager2
+    implementation("androidx.viewpager2:viewpager2:1.0.0")
+
     // Coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
-    // Security - EncryptedSharedPreferences
+    // Security - EncryptedSharedPreferences (MasterKey.Builder 사용 시 1.1.0-alpha 이상 필요. 1.0.0 안정 버전은 API 차이로 전환 불가)
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // Testing

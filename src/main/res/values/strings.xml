@@ -10,6 +10,7 @@
     
     <!-- 메인 화면 -->
     <string name="current_points">현재 포인트: %1$d WP</string>
+    <string name="time_credit_timer">보상 시간: %1$s</string>
     <string name="blocked_apps">차단된 앱</string>
     <string name="add_app">앱 추가</string>
     <string name="no_blocked_apps">차단된 앱이 없습니다</string>
@@ -31,12 +32,12 @@
     
     <!-- 서비스 알림 -->
     <string name="notification_channel_app_blocking">앱 차단</string>
-    <string name="notification_channel_point_mining">포인트 채굴</string>
     <string name="notification_app_blocking_title">앱 차단 활성화</string>
-    <string name="notification_point_mining_title">포인트 채굴 중</string>
+    <string name="notification_channel_time_credit">타임 크레딧</string>
+    <string name="notification_time_credit_title">타임 크레딧 활성</string>
     
     <!-- 접근성 서비스 -->
-    <string name="accessibility_service_description">앱 실행을 감지하여 차단된 앱을 모니터링합니다.</string>
+    <string name="accessibility_service_description">앱 사용 제한 및 엄격모드 보호를 위해 사용됩니다. 차단된 앱 실행을 감지하여 모니터링하고, 엄격모드 활성화 시 설정 페이지에서 앱 삭제 및 접근성 서비스 해제를 방지합니다.</string>
     
     <!-- 권한 관련 추가 -->
     <string name="overlay_permission_required">오버레이 권한이 필요합니다</string>
@@ -76,6 +77,10 @@
     <string name="go_to_settings">설정으로 이동</string>
     <string name="later">나중에</string>
     <string name="settings">설정</string>
+    <string name="notification_disabled_title">알림이 꺼져 있음</string>
+    <string name="notification_disabled_message">알림이 비활성화되어 있습니다. 앱 차단 알림을 받을 수 없습니다.</string>
+    <string name="notification_access_required_title">알림 액세스 권장</string>
+    <string name="notification_access_required_message">화면이 꺼진 상태에서도 차단 앱 오디오를 정확히 감지하려면 알림 액세스가 필요합니다.\n\n설정 &gt; 알림 &gt; 알림 액세스에서 \"%1$s\"을(를) 켜주세요.</string>
     
     <!-- 플레이스홀더 (레이아웃용) -->
     <string name="app_name_placeholder">App Name</string>
@@ -94,4 +99,78 @@
     <string name="persona_unregister">등록 해제</string>
     <string name="persona_unregister_description">랜덤 텍스트 사용</string>
     <string name="persona_selected">%1$s 페르소나가 선택되었습니다</string>
+    
+    <!-- 상점 -->
+    <string name="shop_title">상점</string>
+    <string name="inventory">인벤토리</string>
+    <string name="purchase">구매</string>
+    <string name="use">사용</string>
+    <string name="item_dopamine_shot">도파민 샷</string>
+    <string name="item_dopamine_shot_description">SNS 앱을 20분간 허용합니다</string>
+    <string name="item_standard_ticket">스탠다드 티켓</string>
+    <string name="item_standard_ticket_description">SNS 제외 전체 앱을 1시간 동안 허용합니다</string>
+    <string name="item_cinema_pass">시네마 패스</string>
+    <string name="item_cinema_pass_description">OTT 앱을 4시간 동안 허용합니다</string>
+    <string name="item_price">가격: %1$d WP</string>
+    <string name="item_quantity">보유: %1$d개</string>
+    <string name="item_cooldown">쿨타임: %1$s</string>
+    <string name="purchase_success">구매 완료</string>
+    <string name="purchase_failed">구매 실패: %1$s</string>
+    <string name="use_success">사용 완료</string>
+    <string name="use_failed">사용 실패: %1$s</string>
+    <string name="insufficient_points">포인트가 부족합니다</string>
+    <string name="cooldown_remaining">쿨타임이 남아있습니다</string>
+    <string name="inventory_full">인벤토리가 가득 찼습니다</string>
+    
+    <!-- 설정 -->
+    <string name="settings_title">설정</string>
+    <string name="custom_reset_time_title">나의 하루가 끝나는 시간</string>
+    <string name="custom_reset_time_description">하루가 끝나는 시간을 설정하세요. 예: 새벽 2시를 설정하면 오늘 02:00 ~ 다음 날 01:59가 하루로 간주됩니다.</string>
+    <string name="current_reset_time">현재 설정: %1$s</string>
+    <string name="select_time">시간 선택</string>
+    <string name="reset_time_updated">리셋 시간이 %1$s로 변경되었습니다</string>
+    <string name="reset_time_update_failed">리셋 시간 변경에 실패했습니다</string>
+    <string name="home">홈</string>
+    
+    <!-- 엄격모드 -->
+    <string name="strict_mode_title">엄격모드</string>
+    <string name="strict_mode_inactive">비활성화됨</string>
+    <string name="strict_mode_active">활성화됨 (남은 시간: %1$d분)</string>
+    <string name="strict_mode_active_seconds">활성화됨 (남은 시간: %1$d초)</string>
+    <string name="strict_mode_active_dhm">활성화됨 (남은 시간: %1$d일 %2$d시간 %3$d분)</string>
+    <string name="strict_mode_expired">엄격모드가 만료되어 해제되었습니다</string>
+    <string name="strict_mode_enable">엄격모드 활성화</string>
+    <string name="strict_mode_disable">엄격모드 비활성화</string>
+    <string name="strict_mode_enabled">엄격모드가 %1$d분 동안 활성화되었습니다</string>
+    <string name="strict_mode_disabled">엄격모드가 비활성화되었습니다</string>
+    <string name="strict_mode_duration_title">집중 시간 설정</string>
+    <string name="strict_mode_duration_message">집중 시간을 분 단위로 입력하세요</string>
+    <string name="strict_mode_duration_hint">분</string>
+    <string name="strict_mode_invalid_duration">유효한 시간을 입력하세요</string>
+    <string name="strict_mode_emergency_exit">비상구</string>
+    <string name="strict_mode_emergency_exit_title">비상구</string>
+    <string name="strict_mode_emergency_exit_message">%1$d분 후에 엄격모드가 해제됩니다. 그동안 다시 생각해보세요.</string>
+    <string name="strict_mode_emergency_exit_confirm">확인</string>
+    <string name="strict_mode_emergency_exit_success">비상구가 활성화되었습니다</string>
+    <string name="strict_mode_emergency_exit_immediate">엄격모드가 즉시 해제되었습니다</string>
+    <string name="strict_mode_emergency_exit_reduced_5min">종료 시간이 5분 앞당겨졌습니다 (쿨타임: 5분)</string>
+    <string name="strict_mode_emergency_exit_reduced_half">종료 시간이 절반으로 단축되었습니다 (쿨타임: %1$d분)</string>
+    <string name="strict_mode_emergency_exit_cooldown_active">비상구 사용 가능까지 %1$d분 남았습니다</string>
+    <string name="strict_mode_emergency_exit_cooldown_blocked">비상구는 쿨타임 중에는 사용할 수 없습니다</string>
+    <string name="strict_mode_accessibility_permission_required">엄격모드를 사용하려면 접근성 서비스 권한이 필요합니다</string>
+    
+    <!-- 명시적 고지 및 동의 -->
+    <string name="disclosure_title">엄격모드 권한 안내</string>
+    <string name="disclosure_purpose">접근성 API 사용 목적:\n엄격모드 중 설정 변경 및 앱 삭제 방지</string>
+    <string name="disclosure_data_collection">수집하는 데이터:\n없음 (실시간 화면 이벤트 모니터링만 수행)</string>
+    <string name="disclosure_consent_button">동의하고 계속</string>
+    
+    <!-- 기기 관리자 -->
+    <string name="device_admin_description">엄격모드 활성화 시 앱 삭제를 방지하기 위해 기기 관리자 권한이 필요합니다.</string>
+    <string name="device_admin_explanation">엄격모드 중 앱 삭제를 방지하기 위해 기기 관리자 권한이 필요합니다.</string>
+    <string name="device_admin_permission_required">엄격모드를 사용하려면 기기 관리자 권한이 필요합니다</string>
+    <string name="device_admin_disable_blocked">엄격모드가 활성화되어 있는 동안 기기 관리자를 비활성화할 수 없습니다.</string>
+    
+    <!-- 엄격모드 토스트 메시지 -->
+    <string name="strict_mode_blocked_message">엄격모드 활성 중에는 설정을 변경할 수 없습니다</string>
 </resources>

@@ -31,7 +31,7 @@ Faust는 **계층형 아키텍처(Layered Architecture)**를 기반으로 하며
                      │
 ┌────────────────────▼────────────────────────────────────┐
 │                   Service Layer                         │
-│  (AppBlockingService, PointMiningService, etc.)        │
+│  (AppBlockingService, TimeCreditBackgroundService, etc.)        │
 └────────────────────┬────────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────────┐
@@ -81,23 +81,31 @@ com.faust/
 ├── 📱 Presentation Layer
 │   └── presentation/
 │       ├── view/
-│       │   ├── MainActivity.kt                    # 메인 액티비티
+│       │   ├── MainActivity.kt                    # 메인 액티비티 (ViewPager2로 Fragment 통합)
+│       │   ├── MainFragment.kt                    # 메인 Fragment (차단 앱 목록)
+│       │   ├── CreditFragment.kt                   # 타임크레딧 Fragment (보상 시간 확인/사용자 타입 선택)
+│       │   ├── SettingsFragment.kt                # 설정 Fragment (사용자 지정 리셋 시간)
 │       │   ├── GuiltyNegotiationOverlay.kt        # 유죄 협상 오버레이
 │       │   ├── BlockedAppAdapter.kt                # 차단 앱 리스트 어댑터
 │       │   ├── AppSelectionDialog.kt              # 앱 선택 다이얼로그
 │       │   └── PersonaSelectionDialog.kt           # 페르소나 선택 다이얼로그
 │       └── viewmodel/
-│           └── MainViewModel.kt                  # 메인 ViewModel (MVVM)
+│           ├── MainViewModel.kt                  # 메인 ViewModel (MVVM)
+│           └── CreditViewModel.kt                 # 타임크레딧 ViewModel (MVVM)
 │
 ├── ⚙️ Service Layer
 │   └── services/
 │       ├── AppBlockingService.kt                  # 앱 차단 모니터링 서비스
-│       └── PointMiningService.kt                  # 포인트 채굴 서비스
+│       └── TimeCreditBackgroundService.kt                  # 타임 크레딧 누적·차감 백그라운드 서비스
 │
 ├── 🧠 Business Logic Layer (Domain)
 │   └── domain/
 │       ├── PenaltyService.kt                      # 페널티 계산 및 적용
 │       ├── WeeklyResetService.kt                 # 주간 정산 로직
+│       ├── DailyResetService.kt                  # 일일 초기화 로직 (사용자 지정 시간 지원)
+│       ├── TimeCreditService.kt                  # 타임크레딧 정산/사용/Safeguards 로직
+│       ├── TimeCreditGracePeriodReceiver.kt      # 타임크레딧 Grace Period 알림 수신
+│       ├── AppGroupService.kt                    # 앱 그룹 관리 (SNS/OTT)
 │       └── persona/                               # Persona Module (신규)
 │           ├── PersonaType.kt                    # 페르소나 타입 Enum
 │           ├── PersonaProfile.kt                  # 페르소나 프로필 데이터
@@ -112,19 +120,23 @@ com.faust/
 ├── 💾 Data Layer
 │   └── data/
 │       ├── database/
-│       │   ├── FaustDatabase.kt                  # Room 데이터베이스
+│       │   ├── FaustDatabase.kt                  # Room 데이터베이스 (버전 4)
 │       │   ├── AppBlockDao.kt                     # 차단 앱 DAO
-│       │   └── PointTransactionDao.kt             # 포인트 거래 DAO
+│       │   ├── PointTransactionDao.kt             # 포인트 거래 DAO
+│       │   └── AppGroupDao.kt                     # 앱 그룹 DAO
 │       │
 │       └── utils/
 │           ├── PreferenceManager.kt               # EncryptedSharedPreferences 관리
-│           └── TimeUtils.kt                       # 시간 계산 유틸리티
+│           └── TimeUtils.kt                       # 시간 계산 유틸리티 (사용자 지정 시간 지원)
 │
 ├── 📦 Models
 │   └── models/
 │       ├── BlockedApp.kt                          # 차단 앱 엔티티
 │       ├── PointTransaction.kt                    # 포인트 거래 엔티티
-│       └── UserTier.kt                            # 사용자 티어 enum
+│       ├── UserTier.kt                            # 사용자 티어 enum
+│       ├── UserCreditType.kt                      # 타임크레딧 사용자 프로필 enum
+│       ├── AppGroup.kt                           # 앱 그룹 엔티티
+│       └── AppGroupType.kt                       # 앱 그룹 타입 enum
 │
 └── 🚀 Application
     └── FaustApplication.kt                        # Application 클래스
@@ -139,15 +151,21 @@ com.faust/
 **책임**: UI 컴포넌트 및 사용자 인터랙션 처리
 
 **주요 컴포넌트**:
-- `MainActivity`: 메인 UI 표시 및 권한 요청
+- `MainActivity`: ViewPager2로 Fragment 통합 (MainFragment, CreditFragment, SettingsFragment)
+- `MainFragment`: 차단 앱 목록 및 포인트 표시, 엄격모드 UI
+- `CreditFragment`: 타임크레딧 잔액 확인, 사용자 프로필 선택, 쿨다운 상태 표시
+- `SettingsFragment`: 사용자 지정 일일 리셋 시간 설정
 - `MainViewModel`: 데이터 관찰 및 비즈니스 로직 (MVVM)
+- `ShopViewModel`: 상점 데이터 관찰 및 구매/사용 로직 (MVVM)
 - `GuiltyNegotiationOverlay`: 시스템 오버레이로 유죄 협상 화면 표시
 - `PersonaSelectionDialog`: 페르소나 선택 및 등록 해제 다이얼로그
+- `DisclosureDialogFragment`: 엄격모드 권한 요청 전 명시적 고지 및 동의
 
 **핵심 특징**:
 - StateFlow를 통한 반응형 UI 업데이트
 - 데이터베이스 직접 접근 제거로 경량화
 - Persona Module 통합: 능동적 계약 방식 (사용자 입력 검증)
+- ViewPager2를 통한 탭 기반 네비게이션
 
 → [상세 문서 보기](./docs/arch_presentation.md)
 
@@ -160,6 +178,12 @@ com.faust/
 **주요 컴포넌트**:
 - `PenaltyService`: 페널티 계산 및 적용
 - `WeeklyResetService`: 주간 정산 로직
+- `DailyResetService`: 일일 초기화 로직 (사용자 지정 시간 지원)
+- `TimeCreditService`: 타임크레딧 정산(Batch Settlement), 사용(Credit Session), Safeguards(Cool-down/Grace Period) 관리
+- `TimeCreditGracePeriodReceiver`: Grace Period 알림 수신 (보상 시간 종료 5분/1분 전)
+- `AppGroupService`: 앱 그룹 관리 (SNS/OTT 앱 분류, 향후 카테고리별 차등 비율 확장 가능)
+- `StrictModeService`: 엄격모드 상태 관리 및 타이머 로직 (AlarmManager 사용)
+- `StrictModeExpiredReceiver`: 엄격모드 만료 시 자동 해제 처리
 - `PersonaEngine`: 피드백 조율 엔진 (Safety Net 로직 포함)
 - `PersonaProvider`: 페르소나 프로필 제공 (랜덤 텍스트 지원)
 - `VisualHandler`, `HapticHandler`, `AudioHandler`: 각 피드백 실행
@@ -168,6 +192,8 @@ com.faust/
 - 기기 상태 기반 피드백 모드 자동 조정 (Safety Net)
 - 능동적 계약 방식: 사용자가 정확히 문구를 입력해야 강행 버튼 활성화
 - 페르소나별 맞춤형 피드백 (시각, 촉각, 청각)
+- 사용자 지정 시간 기준 일일 초기화
+- WorkManager를 통한 백그라운드 타이머 관리
 
 → [상세 문서 보기](./docs/arch_domain_persona.md)
 
@@ -178,16 +204,19 @@ com.faust/
 **책임**: 데이터 영속성과 저장소 관리
 
 **주요 컴포넌트**:
-- `FaustDatabase`: Room 데이터베이스 (BlockedApp, PointTransaction 엔티티)
+- `FaustDatabase`: Room 데이터베이스 (버전 4, BlockedApp, PointTransaction, AppGroup, BlockedDomain 엔티티)
 - `PointTransactionDao`: 포인트 거래 DAO (Flow 제공)
 - `AppBlockDao`: 차단 앱 DAO
+- `AppGroupDao`: 앱 그룹 DAO (Flow 제공)
 - `PreferenceManager`: EncryptedSharedPreferences 관리 (AES256-GCM 암호화)
+- `TimeUtils`: 시간 계산 유틸리티 (사용자 지정 시간 기준 날짜 계산)
 
 **핵심 특징**:
 - 단일 소스 원칙: 포인트는 `PointTransaction`의 `SUM(amount)`로 계산
 - 트랜잭션 보장: 모든 포인트 변경 작업이 원자적으로 처리
 - 보안 강화: EncryptedSharedPreferences로 포인트 조작 방지
 - 반응형 데이터: Flow를 통한 자동 UI 업데이트
+- 사용자 지정 시간 지원: 사용자가 설정한 시간 기준으로 "하루" 정의
 
 → [상세 문서 보기](./docs/arch_data.md)
 
@@ -199,10 +228,12 @@ com.faust/
 
 **주요 내용**:
 - 앱 차단 플로우 (Event-driven)
-- 포인트 채굴 플로우
+- 절제 시간 누적 및 앱 진입 시 settleCredits 플로우
 - Persona 피드백 플로우
 - 화면 OFF/ON 감지 및 도주 패널티 플로우
 - 주간 정산 플로우
+- 일일 초기화 플로우 (사용자 지정 시간 기준)
+- 타임크레딧 정산/사용 플로우 (Batch Settlement + Credit Session)
 - 상태 전이 모델 (ALLOWED ↔ BLOCKED)
 
 **핵심 특징**:
@@ -229,11 +260,12 @@ com.faust/
 └───────────────┬───────────────────┬─────────────────────┘
                 │                   │
     ┌───────────▼──────────┐  ┌────▼──────────────────┐
-    │ AppBlockingService    │  │ PointMiningService   │
+    │ AppBlockingService    │  │ TimeCreditBackgroundService   │
     │ (AccessibilityService)│  │                      │
     │                       │  │ • 앱 사용 시간 추적  │
     │ • 이벤트 기반 감지     │  │ • 포인트 자동 적립    │
     │ • 오버레이 트리거     │  │                      │
+    │ • 엄격모드 설정 차단   │  │                      │
     └───────────┬──────────┘  └────┬──────────────────┘
                 │                   │
                 │                   │
@@ -246,6 +278,12 @@ com.faust/
     │      WeeklyResetService                  │
     │  • AlarmManager로 주간 정산 스케줄링      │
     │  • 포인트 몰수 로직                       │
+    └──────────────────────────────────────────┘
+                │
+    ┌───────────▼──────────────────────────────┐
+    │      StrictModeService                   │
+    │  • AlarmManager로 엄격모드 타이머 관리     │
+    │  • 자동 해제 스케줄링                     │
     └──────────────────────────────────────────┘
 ```
 
@@ -266,7 +304,7 @@ com.faust/
   │           ├─► AppBlockingService (시스템 자동 시작)
   │           │     └─► 이벤트 기반 감지 (TYPE_WINDOW_STATE_CHANGED)
   │           │
-  │           └─► PointMiningService.startForeground()
+  │           └─► TimeCreditBackgroundService.startForeground()
   │                 └─► 주기적 포인트 계산
   │
   └─► WeeklyResetService.scheduleWeeklyReset()
@@ -281,7 +319,7 @@ com.faust/
 MainActivity
   ├─► MainViewModel
   ├─► AppBlockingService
-  ├─► PointMiningService
+  ├─► TimeCreditBackgroundService
   ├─► WeeklyResetService
   └─► PreferenceManager
 
@@ -296,9 +334,9 @@ AppBlockingService
   ├─► FaustDatabase
   ├─► GuiltyNegotiationOverlay
   ├─► PenaltyService
-  └─► PointMiningService (pauseMining/resumeMining)
+  └─► TimeCreditBackgroundService (pauseMining/resumeMining)
 
-PointMiningService
+TimeCreditBackgroundService
   ├─► FaustDatabase
   └─► PreferenceManager
 
@@ -366,10 +404,11 @@ UI 반응형 업데이트
 ## 보안 및 권한
 
 ### 필수 권한
-1. **BIND_ACCESSIBILITY_SERVICE**: 접근성 서비스를 통한 앱 실행 감지
+1. **BIND_ACCESSIBILITY_SERVICE**: 접근성 서비스를 통한 앱 실행 감지 및 엄격모드 설정 페이지 차단
 2. **SYSTEM_ALERT_WINDOW**: 오버레이 표시
-3. **FOREGROUND_SERVICE**: 백그라운드 서비스 실행 (PointMiningService용)
+3. **FOREGROUND_SERVICE**: 백그라운드 서비스 실행 (TimeCreditBackgroundService 타임 크레딧용)
 4. **QUERY_ALL_PACKAGES**: 설치된 앱 목록 조회
+5. **BIND_DEVICE_ADMIN**: 엄격모드 중 앱 삭제 방지 (기기 관리자)
 
 ### 보안 강화
 1. **EncryptedSharedPreferences**: 포인트 데이터 암호화 저장
@@ -412,7 +451,12 @@ MainActivity
 
 ### 확장 포인트
 - Standard/Faust Pro 티어 로직
-- 상점 시스템
+- **타임크레딧 시스템(TimeCreditSystem)**: CBT 기반 수반성 관리, 절제 시간에 비례한 보상 크레딧
+  - **정산(Batch Settlement)**: 앱 진입 시 누적 절제 시간 기반 크레딧 일괄 정산
+  - **Credit Session**: 차단 앱 접근 시 세션 시작, 매분 크레딧 차감 (TimeCreditBackgroundService 틱 루프 활용)
+  - **Safeguards**: Grace Period(종료 5분/1분 전 알림)
+  - **사용자 프로필**: Light(4:1), Pro(6:1), Detox(10:1)
+  - **시네마 패스**: 75 WP, 재구매 쿨타임 18시간, 지속 시간 4시간 (OTT 앱 그룹 차단 해제)
 - **Persona Module 확장**:
   - 새로운 페르소나 타입 추가 (PersonaType Enum 확장)
   - 새로운 핸들러 추가 (인터페이스 구현 후 PersonaEngine에 주입)
@@ -470,7 +514,7 @@ MainActivity
 ### 개선 가능 영역
 - 데이터베이스 인덱싱
 - 메모리 누수 방지 (Lifecycle-aware 컴포넌트)
-- PointMiningService도 이벤트 기반으로 전환 검토
+- TimeCreditBackgroundService는 이미 이벤트 기반(화면 ON/OFF, 오디오 콜백)으로 동작
 
 ---
 
@@ -502,6 +546,18 @@ MainActivity
 
 ## 변경 이력 (Architecture Change Log)
 
+### [2026-02-07] Final Enforcement Logic: Dynamic Branching on Screen ON
+- **작업**: Credit 0 & Screen OFF 시 오디오 킬 후 채굴 재개 시점 기록, Screen ON 시 동기 정산 후 잔액 기준으로 포그라운드 재진입 분기(오버레이 vs startCreditSession).
+- **컴포넌트 영향**:
+  - **PreferenceManager**: `lastMiningResumeElapsedRealtime` get/set 추가 (Audio Kill 시점 기록).
+  - **TimeCreditBackgroundService**: `notifyCreditExhausted()`에서 `!isScreenOn`일 때 Mining 재개 시점 기록; `calculateAccumulatedAbstention()`에서 해당 구간 우선 사용; Screen ON 시 `runBlocking { calculateAccumulatedAbstention(); settleCredits() }` 후 `screenOnSettlementDoneCallback` 호출.
+  - **AppBlockingService**: `onScreenOnSettlementDone()` 추가 — BLOCKED + 차단 앱 포그라운드 시 balance ≤ 0이면 showOverlay(Strict Punishment), balance > 0이면 startCreditSession + transitionToState(ALLOWED).
+- **변경 사항**:
+  - Background: Credit 0 & Screen OFF → Kill Audio → Start Mining(재개 시점 저장).
+  - Foreground Re-Entry: Screen ON 후 정산 완료 콜백에서 잔액 체크 → 0 이하면 오버레이, 양수면 세션 시작·재개.
+  - Logic Sync: Audio Kill~Screen ON 구간을 절제로 정산하여 잔액을 재진입 분기 전에 갱신.
+- **영향 범위**: 화면 껐다 켤 때 차단 앱이 포그라운드인 경우 잔액에 따라 일관된 징벌/보상 동작. 기존 Grace Period, Cool-down, 상태 전이 유지.
+
 ### [2024-12-XX] 유죄 협상 오버레이 즉시 호출 변경
 - **작업**: 차단된 앱 실행 시 유죄 협상 오버레이를 즉시 표시하도록 변경
 - **컴포넌트 영향**: `AppBlockingService.transitionToState()`
@@ -517,14 +573,14 @@ MainActivity
 - **작업**: 화면을 끌 때 차단 앱에서 음성이 출력되면 채굴을 중지하고, 이 기록을 보관하여 화면을 켤 때 허용된 앱으로 변경되어도 채굴을 재개하지 않도록 구현
 - **컴포넌트 영향**: 
   - `PreferenceManager`: 화면 OFF 시 차단 앱 오디오 재생 상태 저장/조회 메서드 추가
-  - `PointMiningService`: `isPausedByAudio()` companion 메서드 추가, 오디오 종료 시 플래그 리셋
+  - `TimeCreditBackgroundService`: `isPausedByAudio()` companion 메서드 추가, 오디오 종료 시 플래그 리셋
   - `AppBlockingService`: 화면 OFF 시 상태 확인 및 저장, ALLOWED 전이 시 조건부 재개
 - **변경 사항**:
   - `PreferenceManager`에 `wasAudioBlockedOnScreenOff()`, `setAudioBlockedOnScreenOff()` 메서드 추가
-  - `PointMiningService`에 `isPausedByAudio()` companion 메서드 추가
+  - `TimeCreditBackgroundService`에 `isPausedByAudio()` companion 메서드 추가
   - `AppBlockingService.registerScreenOffReceiver()`에서 화면 OFF 시 `isPausedByAudio` 상태 확인 및 저장
   - `AppBlockingService.transitionToState()`에서 ALLOWED 전이 시 저장된 상태 확인 후 조건부 재개
-  - `PointMiningService.checkBlockedAppAudioFromConfigs()`에서 오디오 종료 시 플래그 리셋
+  - `TimeCreditBackgroundService.checkBlockedAppAudioFromConfigs()`에서 오디오 종료 시 플래그 리셋
 - **영향 범위**:
   - 화면 OFF 시 차단 앱 오디오 재생 중이면 채굴 중지 상태를 기록
   - 화면 ON 후 허용 앱으로 전환되어도 오디오가 종료될 때까지 채굴 재개하지 않음
@@ -579,12 +635,12 @@ MainActivity
 - **작업**: PersonaEngine의 AudioHandler가 재생하는 오디오가 오디오 검사 로직에 의해 차단 앱 오디오로 잘못 감지되어 유죄협상이 반복 호출되는 문제 해결
 - **컴포넌트 영향**: 
   - `AppBlockingService`: 오버레이 표시 상태 추적을 위한 companion object static 변수 추가
-  - `PointMiningService`: 오버레이 표시 중일 때 오디오 검사 건너뛰기
+  - `TimeCreditBackgroundService`: 오버레이 표시 중일 때 오디오 검사 건너뛰기
 - **변경 사항**:
   - `AppBlockingService` companion object에 `isOverlayActive` static 변수 추가 및 `isOverlayActive()` 메서드 추가
   - `AppBlockingService.showOverlay()`에서 오버레이 표시 시 `isOverlayActive = true` 설정
   - `AppBlockingService.hideOverlay()`에서 오버레이 닫힐 때 `isOverlayActive = false` 설정
-  - `PointMiningService.checkBlockedAppAudioFromConfigs()`에서 오버레이 표시 중이면 오디오 검사 건너뛰기
+  - `TimeCreditBackgroundService.checkBlockedAppAudioFromConfigs()`에서 오버레이 표시 중이면 오디오 검사 건너뛰기
 - **영향 범위**:
   - PersonaEngine의 AudioHandler가 재생하는 오디오가 오디오 검사에 의해 감지되지 않음
   - 유죄협상 오버레이 표시 중 PersonaEngine 오디오 재생으로 인한 반복 호출 문제 해결
@@ -610,7 +666,7 @@ MainActivity
 - **변경 사항**:
   - "10초마다" 주기적 검사 설명 제거
   - 오디오 상태 변경 시 한 번만 검사한다는 것을 명확히 설명
-  - 검사 결과를 저장하여 포인트 채굴 여부를 결정한다는 것을 명확히 설명
+  - 검사 결과를 저장하여 절제 시간 누적 여부를 결정한다는 것을 명확히 설명
   - 이벤트 처리 로직 설명 강화
 - **영향 범위**:
   - 아키텍처 문서의 정확성 향상
@@ -628,7 +684,7 @@ MainActivity
 - **영향 범위**:
   - 강행 버튼 클릭 후 화면 OFF → ON 시나리오에서 중복 징벌 방지
   - Grace Period 활성화 시 오버레이만 표시하지 않으며, 채굴 중단 및 상태 전이는 정상 작동
-  - 다른 검사 로직(Cool-down, 오디오 차단 등) 및 포인트 채굴 재개 로직에 영향 없음
+  - 다른 검사 로직(Cool-down, 오디오 차단 등) 및 절제 시간 누적 재개 로직에 영향 없음
 
 ### [2026-01-XX] 철회 버튼 클릭 후 빠른 앱 재실행 시 유죄협상 미호출 문제 해결
 - **작업**: 철회 버튼 클릭 후 빠르게 차단 앱을 실행했을 때 유죄협상이 호출되지 않는 현상 해결
@@ -724,6 +780,109 @@ MainActivity
   - 오버레이 닫힘 시 Window ID 기억이 리셋되어 빠른 재실행 시나리오 정상 작동
   - 기존 로직 보존: Window ID 검사, Throttling, 상태 머신 패턴 모두 유지
 
+### [2026-02-07] Credit 소진 시 강제 미디어 정지 (Forced Media Termination on Credit Exhaustion)
+- **작업**: 잔액 0 + 화면 OFF + 오디오 차단 시 배경 미디어 강제 정지 및 사용자 피드백.
+- **트리거**: Time Credit Balance == 0 AND isScreenOFF == true AND audioBlocked == true.
+- **변경 요약**:
+  - **PenaltyService**: `executeForcedMediaTermination(packageName)` 추가 — 오디오 포커스 요청(AUDIOFOCUS_GAIN) 후 해제, ACTION_MEDIA_BUTTON + KEYCODE_MEDIA_PAUSE 브로드캐스트, 3회 짧은 진동(80ms), D/PenaltyService 로그.
+  - **TimeCreditBackgroundService**: `notifyCreditExhausted()` 내에서 `!isScreenOn && isPausedByAudio`일 때 PenaltyService.executeForcedMediaTermination() 호출.
+- **영향 컴포넌트**: PenaltyService, TimeCreditBackgroundService. 문서: docs/arch_events.md §D.5, docs/arch_domain_persona.md.
+
+### [2026-02-07] Credit Session 차감: 세션 구간 일괄 차감(Session Duration) 방식 전환
+- **작업**: 주기적(60초) 차감 제거 → 세션 시작~종료 구간을 한 번에 계산하여 일괄 차감. 1:1 비율 유지, 최소 차감 임계값 없음.
+- **변경 요약**:
+  - **Start**: `TimeCreditService.startCreditSession()`에서 `startTime = System.currentTimeMillis()`, `creditAtSessionStartSeconds` 저장. `lastKnownAliveSessionTime` 0으로 초기화.
+  - **실시간 모니터링**: `TimeCreditBackgroundService`의 **Session Monitor** (30초 주기). `(currentTime - startTime) / 1000 >= creditAtSessionStartSeconds`이면 즉시 차단(notifyCreditExhausted).
+  - **종료 시 일괄 차감**: `performFinalDeductionOnSessionEnd()`에서 `totalSeconds = (endTime - startTime) / 1000`, `actualDeduct = min(totalSeconds, balance)` 한 번만 차감.
+  - **Last Known Alive**: 30초마다 `setLastKnownAliveSessionTime(now)`. 프로세스 비정상 종료 시 복구: `tryRecoverSessionIfKilled()`에서 `(lastKnownAlive - startTime)/1000` 차감 후 세션 종료.
+- **제거/조정**: 틱 루프 내 세션 중 주기 차감 제거. 화면 OFF 시 세션 중 차감 제거(종료 시 일괄만). `calculateAccumulatedAbstention()`에서 세션 활성 시 OFF 구간 부분 차감 제거.
+- **영향 컴포넌트**: PreferenceManager(creditAtSessionStart, lastKnownAlive), TimeCreditService, TimeCreditBackgroundService(sessionMonitorJob, tryRecoverSessionIfKilled).
+
+### [2026-02-07] Adaptive Monitoring (60s threshold), syncState(), 96s race fix (Dormant)
+- **작업**: 잔여 크레딧 기반 적응형 감시(Smart Credit Governor) 도입. 96초 잔액에서 오디오 중단 감지 시 조기 세션 종료되던 레이스 컨디션 제거.
+- **핵심 로직**: `syncState()` 통합 정산 — 사용량 계산(calculateUsageSinceLastSync) → 잔액 갱신 → 구간 판정 → 알람/틱 제어. 구간: 안전(C>60) = 1초 틱 중지, (C-60)초 후 정밀 전환 알람; 위험(0<C≤60) = 1초 정밀 감시 + Grace Period "1분 후 종료" 알림 1회; 소진(C≤0) = notifyCreditExhausted().
+- **96초 버그**: 골든 타임 루프에서 "오디오 중단" 시 C==0 우선 검사. C>0이면 세션 종료 금지, 휴면(Dormant) 진입(1초 틱 중지, lastSync 갱신, 정밀 전환 알람 예약). 알람 수신 시 syncState()로 재판정.
+- **알람**: ACTION_PRECISION_TRANSITION, cancel 후 FLAG_UPDATE_CURRENT로 예약. Grace Period 알림은 세션 시작 시 스케줄 제거, 위험 구간 첫 진입 시 1회만 발송.
+- **영향 컴포넌트**: TimeCreditBackgroundService(syncStateLock, syncState, calculateUsageSinceLastSync, cancel/schedulePrecisionTransitionAlarm, startGoldenTimeJob Dormant 분기), TimeCreditService(ACTION_PRECISION_TRANSITION, setTimeCreditLastSyncTime at session start), AppBlockingService(onCreditSessionStarted 호출), PreferenceManager(getTimeCreditLastSyncTime/setTimeCreditLastSyncTime 기존 사용).
+
+### [2026-02-07] Credit Mining(이중 정산) 방지
+- **작업**: Credit Session 활성 중 절제 시간이 누적되어 "사용 중 보상"이 발생하는 논리적 결함 제거.
+- **문제**: TimeCreditBgService·PointMiningService가 세션 여부와 무관하게 절제 시간을 누적하여, 차단 앱 사용(크레딧 차감)과 동시에 절제 보상이 쌓이는 이중 정산 가능.
+- **수정 사항**:
+  - **세션 시작 시 미정산 무효화**: `TimeCreditService.startCreditSession()`에서 세션 활성화 직후 `setAccumulatedAbstentionSeconds(0L)` 호출. 사용 시작 전까지 쌓인 "미정산 절제 시간"은 보상으로 인정하지 않음.
+  - **틱 루프 이중 가드**: `TimeCreditBackgroundService` 틱 루프의 절제 누적 분기에서 `!isCreditSessionActive()` 재확인 및 로그 추가 (이중 정산 방지).
+  - **화면 ON 절제 누적 가드**: `PointMiningService.calculateAccumulatedPoints()`에서 Credit Session 활성 시 절제 시간 누적 스킵.
+- **영향 컴포넌트**: TimeCreditService, TimeCreditBackgroundService, PointMiningService. 공용 상태는 PreferenceManager(isCreditSessionActive) 유지.
+
+### [2026-02-07] Credit Session 최종 차감 및 1:1 비율 보장
+- **작업**: Credit Session 종료 시 잔액이 차감되지 않는 버그 수정, 초과 차감 방지, 중복 차감 경로 제거.
+- **근본 원인 1**: `endCreditSession()`에 최종 차감 로직 부재. 60초 미만 세션은 Tick이 도달하기 전에 종료되어 잔액 무차감.
+- **근본 원인 2**: 모든 차감 경로가 `lastTickElapsedRealtime` 기준으로 계산하여, 세션 시작 전 시간까지 차감에 포함 (1.6초 사용 → 32초 차감).
+- **수정 원칙**: `min(마지막Tick이후, 세션시작이후)` — 1초 사용 = 1초 차감 (1:1 비율).
+- **컴포넌트 영향**:
+  - `TimeCreditBackgroundService`: `performFinalDeductionOnSessionEnd()` 추가 + `performFinalDeduction()` companion 메서드 추가
+  - `TimeCreditBackgroundService`: 모든 차감 경로에 `sessionStartElapsedRealtime` 하한 적용 (performFinalDeductionOnSessionEnd, performFinalDeductionOnScreenOff, startTickJob 틱 루프)
+  - `AppBlockingService`: `endCreditSession()` 호출 직전 `TimeCreditBackgroundService.performFinalDeduction()` 호출 추가
+  - `TimeCreditService.startCreditSession()`: 세션 이미 활성 시 재시작 방지 가드 추가 (`sessionStartElapsedRealtime` 리셋 방지)
+  - `PointMiningService`: 중복 크레딧 차감 로직 제거 (TimeCreditBackgroundService에 위임), 포인트 적립 스킵만 유지
+- **영향 범위**: Credit Session 차감 1:1 비율 보장, 60초 미만 세션에서도 정확한 잔액 차감, 초과 차감 방지
+
+### [2026-02-07] Remainder Retention and Deferred Persist (나머지 유지·지연 저장)
+- **작업**: 정산 시 나머지(ratio로 나누어떨어지지 않는 초) 유지 + 초 단위 저장 시 디스크 부하 감소.
+- **Remainder retention**: `settleCredits()`에서 `remainderSeconds = totalSeconds % userRatio`로 계산 후 `setAccumulatedAbstentionSeconds(remainderSeconds)` 호출. 예: 59초 절제/비율 4 → 14초 보상, 3초 나머지 유지; 이후 1초 추가 시 4초가 되어 1초 추가 보상.
+- **Deferred persist**: PreferenceManager에 잔액·누적값의 in-memory 캐시 도입. `setTimeCreditBalanceSeconds`/`setAccumulatedAbstentionSeconds`는 캐시+Flow만 갱신. `persistTimeCreditValues()` 호출 시에만 디스크 저장. 호출 시점: (1) 화면 OFF 시 (TimeCreditBackgroundService), (2) 틱 루프 1분 간격, (3) MainActivity.onDestroy(), (4) TimeCreditBackgroundService.onDestroy().
+
+### [2026-02-07] Second-Precision Time Credit Settlement (초 단위 정산)
+- **작업**: Time Credit 시스템을 분(Minutes) 단위에서 초(Seconds) 단위로 전환하여 reward loss 방지 (예: 1분 절제 / ratio 4 = 0 → 60초 / 4 = 15초 크레딧).
+- **원칙**: Zero-Deletion(기존 로직 유지), 마이그레이션(기존 분 키 → 초 키 일회 변환), High Precision(누적·잔액·차감 모두 초 단위).
+- **컴포넌트 영향**:
+  - **Data Layer**: PreferenceManager에 `KEY_TIME_CREDIT_BALANCE_SECONDS`, `KEY_ACCUMULATED_ABSTENTION_SECONDS` 추가. `getTimeCreditBalanceSeconds()`/`setTimeCreditBalanceSeconds()`, `getAccumulatedAbstentionSeconds()`/`setAccumulatedAbstentionSeconds()`. `getTimeCreditBalanceFlow()`: Flow&lt;Long&gt;. 기존 분 키 존재 시 첫 조회 시 초로 마이그레이션.
+  - **Domain Layer**: TimeCreditService.settleCredits() → earnedSeconds = totalAbstentionSeconds/ratio, 잔액·누적 모두 초. applyPenaltyMinutes(minutes) → 내부적으로 분×60 초 차감. SettlementResult/UseResult 필드 초 단위.
+  - **Service Layer**: TimeCreditBackgroundService 틱 루프 60초마다 60초 누적/차감. calculateAccumulatedAbstention() → elapsedRealtime 차이를 초로 계산하여 누적/차감. performFinalDeductionOnScreenOff() → 경과 초 단위 차감. scheduleExhaustionTimer(balanceSeconds: Long).
+  - **Presentation Layer**: MainViewModel TimerUiState.Idle(balanceSeconds), getTimeCreditBalanceFlow() 구독 Long. formatBalanceAsHhMmSs(balanceSeconds). CreditViewModel/CreditFragment 잔액·누적 StateFlow&lt;Long&gt;, HH:MM:SS 포맷.
+  - **PenaltyService**: 잔액 조회/저장을 getTimeCreditBalanceSeconds/setTimeCreditBalanceSeconds 사용, 패널티 분×60 초 차감.
+- **성공 기준**: 1분 절제 시 ratio 4에서 "15초 earned" 로그, 메인 타이머 초 단위 표시, 앱 재시작/화면 이벤트 후에도 부분 분 손실 없음.
+
+### [2026-02-07] 코드 정합성 검토 기반 수정 (기술적 보완 6항목 + 정교화 4+3항목 포함)
+- **searchBlockedContentInTree** recycle 삼중 방어: Max Depth(>=50) + finally try/catch(Throwable) + 이중 recycle 제거
+- **BroadcastReceiver** goAsync 8초 준수 + applicationScope + NonCancellable 분리(후처리만) + 롤백 보장 + 정산 중복 쿨다운(60초)
+- **PointMiningService** 물리적 격리: 파일명 `PointMiningService_DEPRECATED.kt`, 가시성 하향, `@Deprecated(ERROR)`
+- **OverlayState** ACTIVE/DISMISSING 추가 + companion 단일 `_overlayState` + `isOverlayActive` 제거 + `isOverlayBlockingEvents()`/`isPersonaAudioPossiblyPlaying()` + onDestroy Ghost Overlay 버그 수정(동기 dismiss 후 scope 취소)
+- **onProceed()** PenaltyService 경유 통일 + 중복 호출 방지 가드
+- **PreferenceManager** 싱글톤 + `getInstance(context)` 정적 메서드
+- **persistTimeCreditValues** `synchronous` 파라미터 + commit() 재시도 + 복구 플래그(KEY_PERSIST_DIRTY) + 비상 파일 덤프(tc_emergency_dump.txt) + 앱 시작 시 복구 로직
+
+### [2026-02-07] 메인 화면 TimeCredit 타이머 UI 전환
+- **작업**: 메인 화면 상단 "포인트(WP)" 표시를 제거하고, PreferenceManager TimeCredit 잔액 기반 HH:MM:SS 실시간 타이머로 교체
+- **원칙**: Zero-Deletion(포인트/DB 로직 유지), Reactivity(SharedFlow), Precision(단조 시간·하이브리드 저장)
+- **컴포넌트 영향**:
+  - **Data Layer**: PreferenceManager에 `getTimeCreditBalanceFlow()` (SharedFlow&lt;Int&gt; replay=1) 추가, `setTimeCreditBalance()` 시 emit
+  - **Domain Layer**: TimeCreditService 세션 시작/종료 시 `sessionStartElapsedRealtime` (SystemClock.elapsedRealtime()) 런타임 변수 설정
+  - **Presentation Layer**: MainViewModel에 `TimerUiState`(Idle/Running/Syncing), `timerUiState` StateFlow, `getRemainingSecondsForDisplay()`, Sync Safeguard(5초), `formatTimeAsHhMmSs`(Locale.US) 추가. MainFragment는 `timerUiState` 구독, `repeatOnLifecycle(STARTED)` 내 1초 틱, textCurrentPoints에 Monospace 적용
+  - **리소스**: `time_credit_timer` 문자열(국문/영문), fragment_main.xml textCurrentPoints fontFamily monospace
+- **데이터 흐름**: 메인 카드 표시는 PointTransactionDao 대신 PreferenceManager.getTimeCreditBalanceFlow() 구독. 포인트 관련 DB/로직은 삭제 없이 유지.
+
+### [2026-02-06] FreePass → TimeCreditSystem 전환
+- **작업**: FreePass 시스템(도파민 샷, 스탠다드 티켓, 시네마 패스) 완전 제거, 절제 시간 비례 보상형 TimeCreditSystem으로 전환
+- **핵심 철학**: CBT 기반 수반성 관리, 배터리 효율을 위한 Batch Settlement, 깜짝 선물 방식
+- **컴포넌트 영향**:
+  - 데이터 레이어: FreePassItem, DailyUsageRecord 엔티티/DAO 제거, FaustDatabase v3→v4 마이그레이션
+  - 도메인 레이어: FreePassService, ActivePassService 삭제, TimeCreditService, TimeCreditGracePeriodReceiver 추가
+  - 프레젠테이션 레이어: ShopFragment/ShopViewModel 삭제, CreditFragment/CreditViewModel 추가
+  - 서비스 레이어: AppBlockingService FreePass 체크 → TimeCredit/CreditSession 체크로 교체
+  - TimeCreditBackgroundService: 절제 시간 누적(C-1), Credit Session 차감(C-2) 로직 추가
+  - DailyResetService: FreePass 트랜잭션 블록 제거, TimeCredit 확장점 확보(C-3)
+  - PreferenceManager: FreePass 키/메서드 제거, TimeCredit/CreditSession/Cooldown/GracePeriod 키/메서드 추가
+  - MainActivity: onResume() TimeCredit 정산, WorkManager PassExpirationWorker 정리(M-2)
+- **영향 범위**:
+  - 사용자가 절제한 시간에 비례하여 보상 크레딧을 획득하고, 차단 앱 접근 시 자동으로 사용
+  - 종료 임박 시 Grace Period 알림
+  - 유죄협상은 크레딧 없을 경우 즉시 실행
+
+### [2026-01-XX] 프리 패스 시스템 구현 (→ 2026-02-06 TimeCreditSystem으로 대체됨)
+- **상태**: ~~Deprecated~~ → TimeCreditSystem으로 완전 대체됨
+- **원본 작업**: 도파민 샷, 스탠다드 티켓, 시네마 패스 구매 및 사용 시스템 구현
+
 ### [2026-01-XX] 상태 전이 즉시화로 빠른 재실행 문제 근본 해결
 - **작업**: 오버레이 닫힘 후 빠른 재실행 시 상태 전이 지연과 Throttling 지연의 누적으로 인한 차단 문제 해결
 - **원인 분석**:
@@ -746,6 +905,69 @@ MainActivity
   - 빠른 재실행 시나리오에서도 정상 작동 (Throttling 지연만 존재, 상태 전이 지연 없음)
   - 기존 로직 보존: PersonaEngine 오디오 정지 로직, 홈 이동 지연 로직 모두 유지
   - 리소스 정리 보장: 백업한 참조로 `dismiss()` 호출하여 리소스 정리 보장
+
+### [2026-01-29] 엄격모드(Strict Mode) 기능 구현
+- **작업**: 사용자가 설정한 집중 시간 동안 앱 삭제와 접근성 서비스 해제를 기술적으로 제한하는 기능 구현
+- **컴포넌트 영향**:
+  - **Domain Layer**: `StrictModeService`, `StrictModeExpiredReceiver` 신규 생성
+  - **Service Layer**: `FaustAdminReceiver` 신규 생성, `AppBlockingService`에 엄격모드 차단 로직 통합
+  - **Presentation Layer**: `DisclosureDialogFragment` 신규 생성, `MainFragment` UI 추가
+  - **Data Layer**: `PreferenceManager` 엄격모드 관련 메서드 추가
+- **변경 사항**:
+  - `StrictModeService`: 엄격모드 상태 관리 및 AlarmManager를 통한 자동 해제 스케줄링
+  - `StrictModeExpiredReceiver`: 엄격모드 만료 시 자동 해제 처리
+  - `AppBlockingService`: 엄격모드 활성 시 설정 페이지 접근 차단 로직 통합 (기존 앱 차단 로직과 함께)
+  - `FaustAdminReceiver`: DeviceAdminReceiver로 앱 삭제 방지
+  - `DisclosureDialogFragment`: 구글 플레이 정책 준수를 위한 명시적 고지 및 동의
+  - `MainFragment`: 엄격모드 활성화 버튼, 상태 표시, 비상구 버튼 추가
+  - `PreferenceManager`: 엄격모드 상태 저장/조회 메서드 추가
+  - `AndroidManifest.xml`: 새로운 리시버 등록 (접근성 서비스는 AppBlockingService 하나만 사용)
+  - `accessibility_service_config.xml`: 이벤트 타입 및 권한 업데이트 (typeWindowContentChanged 추가, canRetrieveWindowContent=true)
+  - `device_admin.xml`: XML 리소스 파일 추가
+- **영향 범위**:
+  - 사용자가 집중 시간 동안 앱 삭제와 설정 변경을 제한할 수 있음
+  - 구글 플레이 정책 준수: 명시적 고지, 타이머 기반 자동 해제, 비상구 제공
+  - 기존 로직 보존: Zero-deletion Policy 준수, 모든 기존 서비스 및 도메인 로직 유지
+  - 접근성 서비스 통합: 두 개의 서비스를 하나로 통합하여 사용자 혼란 방지 및 구글 플레이 정책 최적화
+
+### [2026-01-29] 구간별 차등 비상구 구현
+- **작업**: 엄격모드 비상구를 남은 시간에 따라 차등 보상을 제공하는 시스템으로 구현
+- **컴포넌트 영향**:
+  - **Domain Layer**: `StrictModeService.processEmergencyExit()` 신규 추가
+  - **Data Layer**: `PreferenceManager`에 비상구 쿨타임 관련 메서드 추가
+  - **Presentation Layer**: `MainFragment.showEmergencyExitDialog()` 로직 변경
+- **변경 사항**:
+  - 구간별 처리: 5분 이하 즉시 해제, 10분/15분/20분 구간별 시간 단축(각 5분) 및 쿨타임 적용
+  - 20분 이상: 절반 단축 + 점진적 쿨타임 (5-20분)
+  - AlarmManager 재예약으로 종료 시각 동기화
+  - 쿨타임 관리로 비상구 남용 방지
+  - `EmergencyExitResult` 데이터 클래스 추가
+  - `PreferenceManager`에 `getEmergencyExitLastClickTime()`, `setEmergencyExitLastClickTime()`, `getEmergencyExitCooldownMinutes()`, `setEmergencyExitCooldownMinutes()` 메서드 추가
+  - `MainFragment`에 쿨타임 체크 로직 추가 (버튼 클릭 시점 및 다이얼로그 내부 이중 체크)
+  - `strings.xml`에 구간별 메시지 문자열 추가
+- **영향 범위**:
+  - 사용자가 남은 시간에 따라 다른 보상을 받는 구간별 차등 비상구 시스템 제공
+  - 게임 이론 기반의 동기 부여 시스템으로 사용자 참여도 향상
+  - 쿨타임 관리로 비상구 남용 방지
+  - 기존 로직 보존: Zero-deletion Policy 준수, 모든 기존 메서드 및 로직 유지
+
+### [2026-01-29] 접근성 서비스 통합 (StrictBlockService → AppBlockingService)
+- **작업**: 두 개의 AccessibilityService를 하나로 통합하여 사용자 혼란 방지 및 구글 플레이 정책 최적화
+- **컴포넌트 영향**:
+  - **Service Layer**: `StrictBlockService` 삭제, `AppBlockingService`에 엄격모드 차단 로직 통합
+  - **Presentation Layer**: `MainFragment`에서 `StrictBlockService` 참조 제거
+- **변경 사항**:
+  - `AppBlockingService.onAccessibilityEvent()`: 엄격모드 활성 시 설정 페이지 차단 로직 추가
+  - `AppBlockingService`: `isStrictModeActive()`, `containsBlockedContent()` 메서드 추가
+  - `accessibility_service_config.xml`: `typeWindowContentChanged` 이벤트 타입 추가, `canRetrieveWindowContent="true"` 설정
+  - `strings.xml`: `accessibility_service_description` 업데이트 (앱 차단 + 엄격모드 보호 명시)
+  - `AndroidManifest.xml`: `StrictBlockService` 등록 제거
+  - `MainFragment`: `StrictBlockService` 참조를 `AppBlockingService`로 변경
+  - `strict_block_service_config.xml`: 삭제
+- **영향 범위**:
+  - 사용자가 하나의 접근성 서비스만 활성화하면 됨 (사용자 혼란 방지)
+  - 구글 플레이 정책 준수: 단일 목적 원칙 준수 (하나의 서비스가 두 가지 목적 수행 명시)
+  - 기존 로직 보존: 모든 기존 앱 차단 로직 유지, 엄격모드 차단 로직만 추가
 
 ### [2026-01-XX] 홈 런처 감지로 홈 이동 후 상태 동기화 보장 (강제 상태 초기화 제거)
 - **작업**: 홈으로 이동할 때 홈 런처 패키지를 감지하여 상태를 `ALLOWED`로 전이하도록 변경 (강제 상태 초기화 제거)
@@ -819,6 +1041,24 @@ MainActivity
     - 멀티스레드 환경에서 변수 가시성 보장
     - 엄격 모드 빌드에서도 안전하게 동작
     - 경쟁 조건으로 인한 중복 오버레이 표시 방지
+
+### [2026-02-02] URL 차단 기능 추가 (Universal Browser URL Extraction)
+- **작업**: 브라우저 주소창에서 URL을 추출하여 도메인 기반 차단 기능 구현
+- **컴포넌트 영향**:
+  - **Utils Layer**: `UrlDiscoveryEngine`, `UrlNormalizer` 신규 생성
+  - **Data Layer**: `BlockedDomain` 엔티티, `BlockedDomainDao` 신규 생성, `FaustDatabase` 버전 2→3 마이그레이션
+  - **Models**: `BlockingPreset`, `BlockingPresetRegistry` 신규 생성
+- **변경 사항**:
+  - `UrlDiscoveryEngine`: Geometric-First 휴리스틱(Top 20% Rule) + Safe Early-Exit로 브라우저 주소창 URL 추출
+  - `UrlNormalizer`: URL 입력 검증 및 정규화 (검색어 트랩 방지, 도메인만 추출)
+  - `BlockedDomain`: 차단된 도메인 Room 엔티티 (domain PK, displayName, blockedAt)
+  - `BlockedDomainDao`: 도메인 차단 CRUD 및 조회
+  - `BlockingPreset` / `BlockingPresetRegistry`: 인기 사이트 원탭 차단 프리셋 (YouTube, Facebook, Instagram 등)
+  - `FaustDatabase` 버전 3: `blocked_domains` 테이블 추가
+- **영향 범위**:
+  - 브라우저에서 차단된 도메인 접속 시 차단 가능 (End-to-End 플로우는 후속 구현)
+  - 기존 앱 차단 로직(`BlockedApp`)과 별개로 동작
+  - 기존 로직 보존: Zero-deletion Policy 준수
 
 ---
 

@@ -42,7 +42,7 @@ import kotlin.DeprecationLevel
     message = "TimeCreditBackgroundService로 대체됨. 이 클래스를 참조하지 마세요.",
     level = DeprecationLevel.WARNING
 )
-internal class PointMiningService : LifecycleService() {
+internal class PointMiningServiceLegacy : LifecycleService() {
     private val database: FaustDatabase by lazy {
         (application as FaustApplication).database
     }
@@ -73,7 +73,7 @@ internal class PointMiningService : LifecycleService() {
         private const val NOTIFICATION_ID = 1002
         private const val CHANNEL_ID = "point_mining_channel"
         
-        @Volatile private var instance: PointMiningService? = null
+        @Volatile private var instance: PointMiningServiceLegacy? = null
         
         // 상태전이 시스템: AppBlockingService 콜백
         private var blockingServiceCallback: ((Boolean) -> Unit)? = null
@@ -96,7 +96,7 @@ internal class PointMiningService : LifecycleService() {
             }
             
             Log.d(TAG, "startService() 호출: 새 서비스 시작")
-            val intent = Intent(context, PointMiningService::class.java)
+            val intent = Intent(context, PointMiningServiceLegacy::class.java)
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     context.startForegroundService(intent)
@@ -111,7 +111,7 @@ internal class PointMiningService : LifecycleService() {
         }
 
         private fun stopService(context: Context) {
-            val intent = Intent(context, PointMiningService::class.java)
+            val intent = Intent(context, PointMiningServiceLegacy::class.java)
             context.stopService(intent)
         }
         

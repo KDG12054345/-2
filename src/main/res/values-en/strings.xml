@@ -17,6 +17,7 @@
     
     <!-- Main Screen -->
     <string name="current_points">Current Points: %1$d WP</string>
+    <string name="time_credit_timer">Remaining Time: %1$s</string>
     <string name="blocked_apps">Blocked Apps</string>
     <string name="add_app">Add App</string>
     <string name="no_blocked_apps">No blocked apps</string>
@@ -53,7 +54,9 @@
     <string name="go_to_settings">Go to Settings</string>
     <string name="later">Later</string>
     <string name="settings">Settings</string>
-    
+    <string name="notification_disabled_title">Notifications are disabled</string>
+    <string name="notification_disabled_message">Notifications are disabled. You will not receive app blocking alerts.</string>
+
     <!-- Persona Prompts -->
     <string name="persona_prompt_street_1">Yo fam, secure the bag. Don\'t get caught lackin</string>
     <string name="persona_prompt_street_2">Manifest that win, then go claim that W. No cap</string>
@@ -62,9 +65,9 @@
     
     <!-- Service Notifications -->
     <string name="notification_channel_app_blocking">App Blocking</string>
-    <string name="notification_channel_point_mining">Point Mining</string>
     <string name="notification_app_blocking_title">App Blocking Active</string>
-    <string name="notification_point_mining_title">Mining Points</string>
+    <string name="notification_channel_time_credit">Time Credit</string>
+    <string name="notification_time_credit_title">Time Credit Active</string>
     
     <!-- Accessibility Service -->
     <string name="accessibility_service_description">Detects app launches to monitor blocked apps.</string>

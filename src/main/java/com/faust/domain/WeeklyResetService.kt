@@ -17,7 +17,11 @@ import com.faust.data.utils.TimeUtils
 import com.faust.models.TransactionType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 /**
  * [시스템 진입점: 시간 기반 진입점 / 부팅 진입점]
@@ -30,17 +34,35 @@ import kotlinx.coroutines.launch
  * @see ARCHITECTURE.md#시스템-진입점-system-entry-points
  */
 class WeeklyResetReceiver : BroadcastReceiver() {
+    companion object {
+        private const val GO_ASYNC_TIMEOUT_MS = 8_000L
+    }
+
     /**
      * [시스템 진입점: 시간 기반 진입점 / 부팅 진입점]
      * 
      * 역할: AlarmManager 트리거 또는 부팅 완료 이벤트를 수신하여 정산 로직을 실행합니다.
      * 트리거: "com.faust.WEEKLY_RESET" 액션 또는 ACTION_BOOT_COMPLETED
-     * 처리: WeeklyResetService.performReset() 호출
+     * 처리: goAsync() + applicationScope에서 performResetInternal() 호출
      */
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED ||
             intent.action == "com.faust.WEEKLY_RESET") {
-            WeeklyResetService.performReset(context)
+            val pendingResult = goAsync()
+            val app = context.applicationContext as FaustApplication
+            app.applicationScope.launch {
+                try {
+                    withTimeout(GO_ASYNC_TIMEOUT_MS) {
+                        WeeklyResetService.performResetInternal(context)
+                    }
+                } catch (e: TimeoutCancellationException) {
+                    android.util.Log.e("WeeklyResetReceiver", "주간 정산 타임아웃 (${GO_ASYNC_TIMEOUT_MS}ms 초과)", e)
+                } catch (e: Exception) {
+                    android.util.Log.e("WeeklyResetReceiver", "주간 정산 실패", e)
+                } finally {
+                    pendingResult.finish()
+                }
+            }
         }
     }
 }
@@ -49,6 +71,7 @@ object WeeklyResetService {
     private const val TAG = "WeeklyResetService"
     private const val REQUEST_CODE = 1003
     private const val RESET_THRESHOLD = 100
+    private const val RESET_COOLDOWN_MS = 60_000L  // 1분 쿨다운 (중복 트리거 방지)
 
     /**
      * [시스템 진입점: 시간 기반 진입점]
@@ -244,29 +267,26 @@ object WeeklyResetService {
     }
 
     /**
-     * [시스템 진입점: 시간 기반 진입점]
-     * 
-     * 역할: 주간 정산 로직을 실행합니다. DB 트랜잭션으로 포인트 조정과 거래 내역 저장을 원자적으로 처리합니다.
-     * 트리거: AlarmManager가 매주 월요일 00:00에 WeeklyResetReceiver를 통해 호출
-     * 처리: 포인트 몰수 처리 (100 WP 초과 시 초과분 몰수, 이하 시 전액 몰수), 다음 주 정산 스케줄링
+     * [Receiver 전용] suspend 버전.
+     * DB 트랜잭션은 취소 가능 (타임아웃 시 Room이 자동 롤백).
+     * 후처리(시간 기록, 알람 재스케줄링)만 NonCancellable.
      */
-    fun performReset(context: Context) {
-        val scope = CoroutineScope(Dispatchers.IO)
-        scope.launch {
-            try {
+    suspend fun performResetInternal(context: Context) {
+        val preferenceManager = PreferenceManager(context)
+        val lastResetTime = preferenceManager.getLastResetTime()
+        val elapsed = System.currentTimeMillis() - lastResetTime
+        if (elapsed < RESET_COOLDOWN_MS) {
+            Log.w(TAG, "정산 건너뜀: 마지막 정산으로부터 ${elapsed}ms 이내 (쿨다운 ${RESET_COOLDOWN_MS}ms)")
+            return
+        }
+        try {
+            withContext(Dispatchers.IO) {
                 val database = (context.applicationContext as FaustApplication).database
-                val preferenceManager = PreferenceManager(context)
-
                 database.withTransaction {
                     try {
-                        // 현재 포인트 조회 (DB에서 계산, 0 이상 보장)
                         val currentPoints = (database.pointTransactionDao().getTotalPoints() ?: 0).coerceAtLeast(0)
-
                         if (currentPoints > RESET_THRESHOLD) {
-                            // 100 WP를 제외한 모든 포인트 몰수
                             val pointsToRemove = currentPoints - RESET_THRESHOLD
-                            
-                            // 거래 내역 저장 (트랜잭션으로 원자적 처리)
                             database.pointTransactionDao().insertTransaction(
                                 com.faust.models.PointTransaction(
                                     amount = -pointsToRemove,
@@ -274,13 +294,9 @@ object WeeklyResetService {
                                     reason = "주간 정산: 100 WP 제외 몰수"
                                 )
                             )
-                            
-                            // PreferenceManager 동기화
                             preferenceManager.setCurrentPoints(RESET_THRESHOLD)
                         } else {
-                            // 100 WP 이하면 모두 몰수
                             if (currentPoints > 0) {
-                                // 거래 내역 저장 (트랜잭션으로 원자적 처리)
                                 database.pointTransactionDao().insertTransaction(
                                     com.faust.models.PointTransaction(
                                         amount = -currentPoints,
@@ -289,31 +305,44 @@ object WeeklyResetService {
                                     )
                                 )
                             }
-                            
-                            // PreferenceManager 동기화
                             preferenceManager.setCurrentPoints(0)
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Error performing reset in transaction", e)
-                        throw e // 트랜잭션 롤백을 위해 예외 재발생
+                        throw e
                     }
                 }
-
-                // 마지막 리셋 시간 업데이트 (트랜잭션 외부에서 실행)
                 preferenceManager.setLastResetTime(System.currentTimeMillis())
-
-                // 다음 주간 정산 스케줄링 (applicationContext 사용하여 안전하게 실행)
-                val appContext = context.applicationContext
-                if (appContext != null) {
-                    scheduleWeeklyReset(appContext)
-                } else {
-                    Log.e(TAG, "Cannot schedule next reset: applicationContext is null")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to perform weekly reset", e)
-                // 트랜잭션이 실패하면 자동으로 롤백됨
-                // 다음 주간 정산은 스케줄링하지 않음 (다음 시도 시 재시도)
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "주간 정산 실패 (DB 트랜잭션 자동 롤백됨)", e)
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) {
+                try {
+                    val appContext = context.applicationContext
+                    if (appContext != null) {
+                        scheduleWeeklyReset(appContext)
+                        Log.d(TAG, "다음 주간 정산 스케줄링 완료 (NonCancellable)")
+                    } else {
+                        Log.e(TAG, "Cannot schedule next reset: applicationContext is null")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "다음 주간 정산 스케줄링 실패", e)
+                }
+            }
+        }
+    }
+
+    /**
+     * [시스템 진입점: 시간 기반 진입점]
+     * 
+     * 역할: 주간 정산 로직을 실행합니다. DB 트랜잭션으로 포인트 조정과 거래 내역 저장을 원자적으로 처리합니다.
+     * 트리거: AlarmManager가 매주 월요일 00:00에 WeeklyResetReceiver를 통해 호출 (또는 직접 호출 시 하위 호환)
+     * 처리: performResetInternal() 호출
+     */
+    fun performReset(context: Context) {
+        CoroutineScope(Dispatchers.IO).launch {
+            performResetInternal(context)
         }
     }
 

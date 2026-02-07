@@ -14,7 +14,9 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.BIND_DEVICE_ADMIN" />
 
     <!-- Android 11+ 패키지 쿼리 선언 -->
     <queries>
@@ -44,7 +46,7 @@
             </intent-filter>
         </activity>
 
-        <!-- 접근성 서비스 (앱 차단) -->
+        <!-- 접근성 서비스 (앱 차단 및 엄격모드 보호) -->
         <service
             android:name=".services.AppBlockingService"
             android:enabled="true"
@@ -59,13 +61,24 @@
         </service>
 
         <service
-            android:name=".services.PointMiningService"
+            android:name=".services.TimeCreditBackgroundService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="point_mining" />
+                android:value="time_credit_background" />
+        </service>
+
+        <!-- 알림 액세스 (MediaSession 정밀 오디오 감지용, 선택 권장) -->
+        <service
+            android:name=".services.FaustNotificationListenerService"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
 
         <!-- 주간 정산 리시버 -->
@@ -75,6 +88,52 @@
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 일일 초기화 리시버 -->
+        <receiver
+            android:name=".domain.DailyResetReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="com.faust.DAILY_RESET" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 엄격모드 만료 리시버 -->
+        <receiver
+            android:name=".domain.StrictModeExpiredReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.faust.STRICT_MODE_EXPIRED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- TimeCredit Grace Period 알림 리시버 -->
+        <receiver
+            android:name=".domain.TimeCreditGracePeriodReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.faust.TIME_CREDIT_5MIN_BEFORE" />
+                <action android:name="com.faust.TIME_CREDIT_1MIN_BEFORE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 기기 관리자 리시버 -->
+        <receiver
+            android:name=".services.FaustAdminReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
             </intent-filter>
         </receiver>
 

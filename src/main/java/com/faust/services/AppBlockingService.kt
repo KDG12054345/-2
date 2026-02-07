@@ -8,16 +8,24 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Toast
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import com.faust.FaustApplication
+import com.faust.R
 import com.faust.data.database.FaustDatabase
 import com.faust.data.utils.PreferenceManager
+import com.faust.domain.AppGroupService
 import com.faust.domain.PenaltyService
+import com.faust.domain.StrictModeService
+import com.faust.domain.TimeCreditService
 import com.faust.presentation.view.GuiltyNegotiationOverlay
 import com.faust.presentation.view.OverlayDismissCallback
 import kotlinx.coroutines.*
@@ -71,6 +79,19 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         PenaltyService(this)
     }
 
+    /** 하이브리드 오디오: 200ms 지연 재검사용 (OS 미디어 세션 정리 대기) */
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // TimeCreditService 인스턴스
+    private val timeCreditService: TimeCreditService by lazy {
+        TimeCreditService(this)
+    }
+
+    // AppGroupService 인스턴스
+    private val appGroupService: AppGroupService by lazy {
+        AppGroupService(this)
+    }
+
     // 현재 협상 중인 앱 정보 저장용
     @Volatile
     private var currentBlockedPackage: String? = null
@@ -80,15 +101,43 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     // 화면 OFF 감지용 BroadcastReceiver
     private var screenOffReceiver: BroadcastReceiver? = null
 
-    // 오버레이 상태 머신 (Overlay State Machine)
+    /**
+     * 오버레이 생명주기 상태 머신 (단일 상태 소스).
+     *
+     * 상태 전이:
+     *   IDLE -> SHOWING -> ACTIVE -> DISMISSING -> IDLE
+     *
+     * - IDLE: 오버레이 없음. 새 오버레이 생성 가능. 이벤트 처리 허용.
+     * - SHOWING: 오버레이 비동기 생성 중. 이벤트 차단.
+     * - ACTIVE: 오버레이가 화면에 표시 중. 이벤트 차단. PersonaEngine 오디오 재생 중.
+     * - DISMISSING: 오버레이 제거 중 + PersonaEngine 오디오 정지 대기(150ms).
+     *              이벤트 허용 (빠른 재진입). 오디오 검사 차단 (PersonaEngine 오감지 방지).
+     *
+     * 이벤트 가드: [isOverlayBlockingEvents] (SHOWING || ACTIVE)
+     * 오디오 가드: [isPersonaAudioPossiblyPlaying] (ACTIVE || DISMISSING)
+     */
     enum class OverlayState {
-        IDLE,           // 대기 상태 (오버레이 없음)
-        SHOWING,        // 표시 중 (오버레이 생성 중)
-        DISMISSING      // 닫히는 중 (오버레이 제거 중)
+        IDLE,
+        SHOWING,
+        ACTIVE,
+        DISMISSING
     }
-    
-    @Volatile
-    private var overlayState: OverlayState = OverlayState.IDLE
+
+    /**
+     * 오버레이 생명주기 상태.
+     * companion의 _overlayState에 위임. 단일 변수이므로 상태 불일치 불가.
+     */
+    private var overlayState: OverlayState
+        get() = AppBlockingService.getOverlayState()
+        set(value) { AppBlockingService.setOverlayState(value) }
+
+    /**
+     * 이벤트 처리를 차단해야 하는 상태인지 확인.
+     * SHOWING(생성 중), ACTIVE(표시 중)일 때 이벤트 차단.
+     * DISMISSING은 차단하지 않음 (빠른 재진입 허용).
+     */
+    private fun isOverlayBlockingEvents(): Boolean =
+        overlayState == OverlayState.SHOWING || overlayState == OverlayState.ACTIVE
 
     // 쿨다운 메커니즘 (중복 유죄협상 방지)
     @Volatile
@@ -107,6 +156,19 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     private var lastProcessedPackage: String? = null
     private val THROTTLE_DELAY_MS = 300L // Throttling 지연 시간 (300ms)
     
+    // 엄격모드 설정 페이지 차단 쿨다운 (성능 최적화)
+    @Volatile
+    private var lastStrictModeCheckTime: Long = 0L
+    private val STRICT_MODE_CHECK_COOLDOWN_MS = 200L // 200ms 쿨다운
+    private val STRICT_MODE_RETRY_DELAY_MS = 150L // rootInActiveWindow null일 때 재시도 지연 시간
+    
+    // 엄격모드 토스트 중복 방지
+    @Volatile
+    private var isStrictModeToastShowing: Boolean = false
+    
+    // 엄격모드 재시도 코루틴 Job (취소 처리용)
+    private var strictModeRetryJob: Job? = null
+    
     // Flow 기반 이벤트 처리 인프라
     private val appLaunchEvents = MutableSharedFlow<AppLaunchEvent>(
         replay = 0,
@@ -121,8 +183,8 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
 
     // 상태전이 시스템 (State Transition System)
     enum class MiningState {
-        ALLOWED,  // 포인트 채굴 활성화
-        BLOCKED   // 포인트 채굴 중단
+        ALLOWED,  // 절제 시간 누적 활성화
+        BLOCKED   // 절제 시간 누적 중단
     }
     
     @Volatile
@@ -141,16 +203,37 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             "com.android.keyguard"
         )
 
-        // 오버레이 표시 상태 추적 (PersonaEngine 오디오 재생 제외용)
-        @Volatile
-        private var isOverlayActive: Boolean = false
+        // 엄격모드 설정 페이지 차단 관련 상수
+        private const val SETTINGS_PACKAGE = "com.android.settings"
+        private const val APP_NAME_KR = "파우스트"
+        private const val APP_NAME_EN = "Faust"
+        private val BLOCKED_KEYWORDS = listOf("제거", "중지", "삭제", "Uninstall", "Disable", "Remove")
 
         /**
-         * 오버레이가 표시 중인지 확인합니다.
-         * PointMiningService에서 PersonaEngine의 오디오 재생을 제외하기 위해 사용됩니다.
+         * 접근성 노드 트리 최대 탐색 깊이.
+         * WebView, RecyclerView 등 복잡한 트리에서 StackOverflowError를 사전 방어.
+         * 일반적 앱 UI는 20-30 depth 이내이므로 50은 충분한 여유.
          */
-        fun isOverlayActive(): Boolean {
-            return isOverlayActive
+        private const val MAX_SEARCH_DEPTH = 50
+
+        /**
+         * 오버레이 생명주기 상태 (단일 상태 소스).
+         * 인스턴스와 companion 모두 이 변수를 사용하므로 동기화 문제 없음.
+         * @Volatile: 멀티스레드 가시성 보장 (Main -> Binder/IO 스레드).
+         */
+        @Volatile
+        private var _overlayState: OverlayState = OverlayState.IDLE
+
+        /**
+         * PersonaEngine 오디오가 아직 재생 중일 수 있는 상태인지 확인.
+         * 기존 isOverlayActive()를 대체. 외부(TimeCreditBackgroundService)에서 호출.
+         */
+        fun isPersonaAudioPossiblyPlaying(): Boolean =
+            _overlayState == OverlayState.ACTIVE || _overlayState == OverlayState.DISMISSING
+
+        internal fun getOverlayState(): OverlayState = _overlayState
+        internal fun setOverlayState(value: OverlayState) {
+            _overlayState = value
         }
 
         fun isServiceEnabled(context: Context): Boolean {
@@ -182,22 +265,40 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         initializeBlockedAppsCache()
         initializeHomeLauncherPackages()
         registerScreenOffReceiver()
-        // 상태전이 시스템: PointMiningService에 콜백 등록
-        PointMiningService.setBlockingServiceCallback(this)
+        // 상태전이 시스템: TimeCreditBackgroundService에 콜백 등록
+        TimeCreditBackgroundService.setBlockingServiceCallback(this)
+        TimeCreditBackgroundService.setCreditExhaustedCallback { packageName -> onCreditExhausted(packageName) }
+        TimeCreditBackgroundService.setScreenOnSettlementDoneCallback { onScreenOnSettlementDone() }
+        // 서비스 생존 보장: TimeCreditBackgroundService가 없으면 재기동
+        if (!TimeCreditBackgroundService.isServiceRunning()) {
+            TimeCreditBackgroundService.startService(applicationContext)
+        }
         // Flow 기반 이벤트 수집 시작
         startAppLaunchFlow()
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        // [버그 수정] 오버레이 동기적 정리: serviceScope 취소 전에 수행
+        currentOverlay?.let { overlay ->
+            try {
+                overlay.dismiss(force = true)
+            } catch (e: Exception) {
+                Log.e(TAG, "onDestroy 오버레이 동기 정리 실패", e)
+            }
+        }
+        currentOverlay = null
+        overlayState = OverlayState.IDLE
+
         blockedAppsFlowJob?.cancel()
         appLaunchFlowJob?.cancel()
+        strictModeRetryJob?.cancel()
         serviceScope.cancel()
-        hideOverlay(shouldGoHome = false)
         blockedAppsCache.clear()
         homeLauncherPackages.clear()
         unregisterScreenOffReceiver()
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
+
+        super.onDestroy()
     }
 
     private fun initializeBlockedAppsCache() {
@@ -256,8 +357,12 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                     // collectLatest 사용: 이전 작업 취소하고 최신 이벤트만 처리
                     // 빠른 앱 전환 시나리오에서 반응성 향상
                     
+                    // ===== 서비스 생존: TimeCreditBackgroundService 없으면 재기동 =====
+                    if (!TimeCreditBackgroundService.isServiceRunning()) {
+                        TimeCreditBackgroundService.startService(applicationContext)
+                    }
                     // ===== 정합성 체크 1: overlayState 체크 (distinctUntilChanged 대체) =====
-                    if (overlayState != OverlayState.IDLE) {
+                    if (isOverlayBlockingEvents()) {
                         Log.d(TAG, "오버레이 활성 상태: 무시 (event=$event, overlayState=$overlayState)")
                         return@collectLatest
                     }
@@ -278,7 +383,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                     }
                     
                     // ===== 모든 체크 통과: handleAppLaunch 호출 =====
-                    handleAppLaunch(event.packageName)
+                    handleAppLaunch(event.packageName) // suspend 함수로 변경됨
                     
                     // ===== 실제 처리 후: lastProcessedPackage 업데이트 =====
                     // ⚠️ 중요: 실제 처리 후에만 업데이트 (다음 Window ID 검사용)
@@ -288,9 +393,25 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
+        val packageName = event.packageName?.toString()
+        
+        // ===== 엄격모드: 설정 페이지 차단 로직 (최우선 처리) =====
+        // 엄격모드가 활성화되어 있고 설정 앱에서 앱 정보 페이지가 열렸는지 확인
+        // 이벤트 타입 확장: TYPE_VIEW_CLICKED, TYPE_VIEW_FOCUSED 추가
+        if (packageName == SETTINGS_PACKAGE && isStrictModeActive()) {
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
+                event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
+                event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
+                
+                checkAndBlockSettingsPage()
+                return  // 설정 페이지 차단 후 이벤트 처리 중단
+            }
+        }
+        
+        // ===== 기존 앱 차단 로직 =====
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val windowId = event.windowId
-            val packageName = event.packageName?.toString()
             val className = event.className?.toString()
             
             // ===== 필터링 1: IGNORED_PACKAGES 체크 (최우선) =====
@@ -311,15 +432,19 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             // Layout/View는 매우 빈번하게 발생하여 debounce 타이머를 계속 리셋시킬 수 있음
             // className이 null인 경우는 보수적으로 허용 (일부 시스템 이벤트 처리)
             // 홈 런처 패키지는 className 필터링을 우회 (홈 화면 감지 보장)
+            // Credit Session 앱(차단 앱)은 package 일치 시 클래스 무관하게 '사용 중'으로 인정 (FrameLayout/ViewGroup 포함)
             val isHomeLauncher = packageName != null && packageName in homeLauncherPackages
-            val isValidClass = isHomeLauncher || className == null || (
+            val isCreditSessionPackage = packageName != null &&
+                preferenceManager.isCreditSessionActive() &&
+                packageName == preferenceManager.getCreditSessionPackage()
+            val isValidClass = isHomeLauncher || isCreditSessionPackage || className == null || (
                 className.contains("Activity") ||
                 className.contains("Dialog") ||
                 className.contains("Fragment")
             )
             
             // Layout, ViewGroup, View 등은 제외 (무한 디바운스 방지)
-            // 단, 홈 런처는 예외로 허용 (홈 화면 감지 보장)
+            // 단, 홈 런처·Credit Session 패키지는 예외로 허용
             if (!isValidClass) {
                 Log.d(TAG, "Activity/Dialog/Fragment 아님 (Layout/View 제외): 무시 (className=$className, package=$packageName)")
                 return  // Flow로 보내지 않음
@@ -331,20 +456,20 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             if (windowId != -1) {
                 // Window ID가 유효한 경우: 같은 창이면 무시
                 // 단, 오버레이가 닫힌 후(IDLE)에는 같은 앱 재실행 허용
-                if (windowId == lastWindowId && packageName == lastProcessedPackage && overlayState != OverlayState.IDLE) {
+                if (windowId == lastWindowId && packageName == lastProcessedPackage && isOverlayBlockingEvents()) {
                     Log.d(TAG, "Window ID 중복: 무시 (windowId=$windowId, package=$packageName, overlayState=$overlayState)")
                     return  // Flow로 보내지 않음
                 }
             } else {
                 // Window ID가 -1인 경우: 오버레이 상태 확인
-                if (overlayState != OverlayState.IDLE && packageName == lastProcessedPackage) {
+                if (isOverlayBlockingEvents() && packageName == lastProcessedPackage) {
                     Log.d(TAG, "Window ID -1 중복: 무시 (package=$packageName, overlayState=$overlayState)")
                     return  // Flow로 보내지 않음
                 }
             }
             
             // ===== 필터링 4: 오버레이 상태 체크 =====
-            if (overlayState != OverlayState.IDLE) {
+            if (isOverlayBlockingEvents()) {
                 Log.d(TAG, "오버레이 활성 상태: 무시 (overlayState=$overlayState)")
                 return  // Flow로 보내지 않음
             }
@@ -382,13 +507,13 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         lastAllowedPackage = packageName
     }
 
-    private fun handleAppLaunch(packageName: String) {
+    private suspend fun handleAppLaunch(packageName: String) {
         val currentTime = System.currentTimeMillis()
 
         // 1. 오버레이 상태 체크: 상태 머신 기반 (최우선 체크)
         // - currentOverlay != null: 오버레이가 이미 표시 중
-        // - overlayState != IDLE: 오버레이가 표시 중이거나 닫히는 중
-        if (currentOverlay != null || overlayState != OverlayState.IDLE) {
+        // - overlayState: 오버레이가 표시 중이거나 생성/제거 중
+        if (currentOverlay != null || isOverlayBlockingEvents()) {
             Log.d(TAG, "오버레이 활성 상태: 패키지 변경 무시 ($packageName, currentOverlay=${currentOverlay != null}, overlayState=$overlayState)")
             return
         }
@@ -415,6 +540,24 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             transitionToState(MiningState.BLOCKED, packageName, triggerOverlay = false)
             return
             }
+
+            // 5.5. TimeCredit 체크: 크레딧이 있으면 Credit Session 시작하여 차단 해제
+            try {
+                if (timeCreditService.isCreditAvailable()) {
+                    val sessionResult = timeCreditService.startCreditSession(packageName)
+                    if (sessionResult is TimeCreditService.UseResult.Success) {
+                        Log.d(TAG, "TimeCredit 사용: Credit Session 시작 ($packageName, 잔액: ${sessionResult.remainingBalanceSeconds}초)")
+                        TimeCreditBackgroundService.onCreditSessionStarted()
+                        transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
+                        return
+                    }
+                }
+                // 크레딧이 없으면 계속 진행하여 유죄협상 오버레이 표시
+                Log.d(TAG, "TimeCredit 없음: 유죄협상 실행 ($packageName)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error checking time credit for $packageName", e)
+                // 에러 발생 시 계속 진행 (오버레이 표시)
+            }
             
             // 6. 쿨다운 체크: 같은 앱이 최근에 홈으로 이동했고 쿨다운 시간 내면 오버레이 표시 차단
             if (packageName == lastHomeNavigationPackage && 
@@ -437,6 +580,23 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             // 9. 상태전이 시스템: BLOCKED → ALLOWED 전이
             // 허용 앱은 Window ID + Throttling으로 충분히 필터링됨
             transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
+
+            // Credit Session: 차단 앱 이탈 시 잔액 있으면 휴면(Dormant) 강제, 없으면 종료.
+            // 최종 차감 → 세션 종료 순서. 잔액이 있으면 즉시 종료하지 않고 반드시 휴면을 거침.
+            if (preferenceManager.isCreditSessionActive()) {
+                val sessionPackage = preferenceManager.getCreditSessionPackage()
+                if (sessionPackage != null && sessionPackage != packageName) {
+                    val balance = preferenceManager.getTimeCreditBalanceSeconds()
+                    if (balance > 0L) {
+                        TimeCreditBackgroundService.requestDormant()
+                        Log.d(TAG, "Credit Session 휴면 진입: 차단 앱($sessionPackage) 이탈, 잔액 ${balance}초 유지")
+                    } else {
+                        TimeCreditBackgroundService.performFinalDeduction()
+                        timeCreditService.endCreditSession()
+                        Log.d(TAG, "Credit Session 종료: 차단 앱($sessionPackage) → 허용 앱($packageName)")
+                    }
+                }
+            }
         }
     }
 
@@ -445,8 +605,8 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     }
 
     private fun showOverlay(packageName: String, appName: String) {
-        // 상태 머신 체크: IDLE 상태가 아니면 차단
-        if (overlayState != OverlayState.IDLE) {
+        // 상태 머신 체크: SHOWING/ACTIVE면 차단, DISMISSING은 허용 (빠른 재진입)
+        if (isOverlayBlockingEvents()) {
             Log.d(TAG, "오버레이 생성 차단: 현재 상태=$overlayState")
             return
         }
@@ -478,11 +638,9 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                     ).apply {
                         show(packageName, appName)
                     }
-                    // 오버레이 표시 상태 설정
-                    isOverlayActive = true
-                    // 상태 전이: SHOWING → IDLE (표시 완료)
-                    overlayState = OverlayState.IDLE
-                    Log.d(TAG, "오버레이 표시 완료: 상태=IDLE")
+                    // [수정] 상태 전이: SHOWING -> ACTIVE (오버레이 표시 중 + PersonaEngine 오디오 재생 중)
+                    overlayState = OverlayState.ACTIVE
+                    Log.d(TAG, "오버레이 표시 완료: 상태=ACTIVE")
                 } else {
                     Log.d(TAG, "오버레이 생성 차단 (비동기 체크): overlayState=$overlayState, currentOverlay=${currentOverlay != null}")
                     // 상태 복구
@@ -514,10 +672,9 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
 
         // 3. 즉시 상태 동기화 및 리셋 (경쟁 조건 방지 핵심)
         // - currentOverlay = null: handleAppLaunch()에서 즉시 새 오버레이 생성 가능하도록
-        // - overlayState = IDLE: 즉시 IDLE로 전환하여 재진입 허용 (비동기 작업 완료 대기하지 않음)
-        // - Window ID 기억 리셋: 즉시 리셋하여 재진입 허용
+        // - ACTIVE -> DISMISSING: 이벤트 허용(재진입 가능), 오디오 검사는 차단 유지
         currentOverlay = null
-        overlayState = OverlayState.IDLE
+        overlayState = OverlayState.DISMISSING
         lastWindowId = -1
         lastProcessedPackage = null
 
@@ -532,12 +689,11 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                 overlayToDismiss?.dismiss(force = true)  // personaEngine.stopAll() 호출
 
                 // 6. PersonaEngine 오디오 정지 완료 대기 (오디오 콜백 지연 고려)
-                // MediaPlayer 정지 및 시스템 오디오 콜백 지연을 고려한 안전 지연
                 delay(DELAY_AFTER_PERSONA_AUDIO_STOP_MS)
 
-                // 7. 오버레이 표시 상태 해제 (PersonaEngine 오디오 정지 완료 후)
-                isOverlayActive = false
-                Log.d(TAG, "오버레이 표시 상태 해제: false (PersonaEngine 오디오 정지 완료 후)")
+                // 7. DISMISSING -> IDLE: PersonaEngine 오디오 완전 정지 후 오디오 검사 재개
+                overlayState = OverlayState.IDLE
+                Log.d(TAG, "오버레이 상태 전이: DISMISSING -> IDLE (PersonaEngine 오디오 정지 완료)")
 
                 // 8. 홈 이동 요청이 있으면 지연 후 실행 (영상 재생 중 화면 축소 방지)
                 if (shouldGoHome) {
@@ -642,12 +798,12 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                 val wasAudioBlockedOnScreenOff = preferenceManager.wasAudioBlockedOnScreenOff()
                 if (wasAudioBlockedOnScreenOff) {
                     Log.d(TAG, "화면 OFF 시 차단 앱 오디오 재생 기록 존재: 채굴 재개하지 않음")
-                    // 플래그는 오디오 종료 시에만 리셋됨 (PointMiningService에서 처리)
+                    // 플래그는 오디오 종료 시에만 리셋됨 (TimeCreditBackgroundService에서 처리)
                     return
                 }
                 
                 Log.d(TAG, "[상태 전이] ALLOWED → resumeMining() 호출")
-                PointMiningService.resumeMining()
+                TimeCreditBackgroundService.resumeMining()
                 Log.d(TAG, "Mining Resumed: 허용 앱으로 전환")
                 preferenceManager.setLastMiningApp(packageName)
                 lastAllowedPackage = null
@@ -657,7 +813,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                 // 상태 변경이 있으면 채굴 중단 처리
                 if (isStateChanged) {
                     Log.d(TAG, "[상태 전이] BLOCKED → pauseMining() 호출")
-                    PointMiningService.pauseMining()
+                    TimeCreditBackgroundService.pauseMining()
                     Log.d(TAG, "Mining Paused: 차단 앱 감지 ($packageName)")
                     preferenceManager.setLastMiningApp(packageName)
                 }
@@ -670,12 +826,11 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                 
                 // 오버레이 표시 조건:
                 // 1. triggerOverlay가 true이고
-                // 2. ALLOWED → BLOCKED 전이인 경우만 오버레이 표시
-                //    (상태 변경이 없으면 이미 처리된 상태이므로 오버레이 표시하지 않음 - hideOverlay() 직후 중복 표시 방지)
-                // 3. 오버레이가 현재 표시되지 않은 경우
+                // 2. ALLOWED -> BLOCKED 전이인 경우만 오버레이 표시
+                // 3. 오버레이가 없고 이벤트 차단 중이 아닌 경우 (IDLE 또는 DISMISSING 시 재진입 허용)
                 val shouldShowOverlay = triggerOverlay && 
-                    isStateChanged && previousState == MiningState.ALLOWED &&  // 상태 변경이 있어야 함
-                    currentOverlay == null && overlayState == OverlayState.IDLE
+                    isStateChanged && previousState == MiningState.ALLOWED &&
+                    currentOverlay == null && !isOverlayBlockingEvents()
                 
                 if (shouldShowOverlay) {
                     Log.d(TAG, "오버레이 표시 조건 충족: triggerOverlay=$triggerOverlay, isStateChanged=$isStateChanged, previousState=$previousState, currentOverlay=${currentOverlay != null}")
@@ -691,19 +846,88 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     }
 
     /**
+     * [Credit Session 소진] 타임 크레딧 소진 시 즉시 차단 오버레이 표시.
+     * TimeCreditBackgroundService의 Exhaustion Timer 또는 최종 차감 시 호출됨.
+     */
+    fun onCreditExhausted(packageName: String) {
+        Log.d(TAG, "[Credit 소진] 즉시 차단 오버레이 표시: $packageName")
+        setAllowedPackage(null)
+        serviceScope.launch {
+            val appName = getAppName(packageName)
+            showOverlay(packageName, appName)
+        }
+    }
+
+    /**
+     * [Foreground Re-Entry] Screen ON 후 정산 완료 시 호출.
+     * 차단 앱이 포그라운드에 있으면 잔액에 따라: balance <= 0 → Strict Punishment(오버레이), balance > 0 → startCreditSession + 재개.
+     */
+    private fun onScreenOnSettlementDone() {
+        if (currentMiningState != MiningState.BLOCKED || currentBlockedPackage == null) return
+        val packageName = currentBlockedPackage!!
+        if (packageName !in blockedAppsCache) return
+        val balance = preferenceManager.getTimeCreditBalanceSeconds()
+        if (balance <= 0L) {
+            Log.d(TAG, "[Screen ON 재진입] 잔액 0: Strict Punishment (showGuiltyNegotiationOverlay)")
+            serviceScope.launch {
+                val appName = currentBlockedAppName ?: getAppName(packageName)
+                showOverlay(packageName, appName)
+            }
+        } else {
+            Log.d(TAG, "[Screen ON 재진입] 잔액 있음: 오버레이 스킵, startCreditSession + 재개 ($packageName, balance=${balance}s)")
+            try {
+                val sessionResult = timeCreditService.startCreditSession(packageName)
+                if (sessionResult is TimeCreditService.UseResult.Success) {
+                    transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
+                } else {
+                    serviceScope.launch {
+                        val appName = currentBlockedAppName ?: getAppName(packageName)
+                        showOverlay(packageName, appName)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "startCreditSession 실패 on Screen ON re-entry", e)
+                serviceScope.launch {
+                    val appName = currentBlockedAppName ?: getAppName(packageName)
+                    showOverlay(packageName, appName)
+                }
+            }
+        }
+    }
+
+    /**
      * [상태전이 시스템] 오디오 상태 변경 처리
-     * PointMiningService에서 오디오 상태 변경 시 호출됨
+     * TimeCreditBackgroundService에서 오디오 상태 변경 시 호출됨.
+     * Credit 세션 중에는 BLOCKED/ALLOWED 전이 모두 무시(플리커 방지·lastMiningApp 무결성).
+     * transitionToState에는 항상 실제 패키지명만 전달하여 setLastMiningApp이 유효한 패키지로 유지되도록 함.
      */
     fun onAudioBlockStateChanged(isBlocked: Boolean) {
         Log.d(TAG, "[오디오 상태 변경] isBlocked=$isBlocked")
         if (isBlocked) {
-            // 오디오 차단 감지: ALLOWED → BLOCKED 전이
+            if (preferenceManager.isCreditSessionActive()) {
+                val pkg = preferenceManager.getCreditSessionPackage() ?: ""
+                Log.d(TAG, "Audio detected, but Credit Session is active. Keeping ALLOWED state for $pkg")
+                return
+            }
+            val packageForAudio = preferenceManager.getLastMiningApp()
+            if (packageForAudio.isNullOrEmpty() || packageForAudio == "audio") {
+                Log.d(TAG, "[오디오 상태 변경] BLOCKED 전이 스킵: 유효한 lastMiningApp 없음")
+                return
+            }
             Log.d(TAG, "[오디오 상태 변경] 차단 감지 → 채굴 중단 처리")
-            transitionToState(MiningState.BLOCKED, "audio", triggerOverlay = false)
+            transitionToState(MiningState.BLOCKED, packageForAudio, triggerOverlay = false)
         } else {
-            // 오디오 종료: BLOCKED → ALLOWED 전이
+            if (preferenceManager.isCreditSessionActive()) {
+                Log.d(TAG, "[오디오 상태 변경] Credit 세션 활성: isBlocked=false 무시 (플리커 방지)")
+                return
+            }
+            val packageForAudio = preferenceManager.getLastMiningApp()
+            if (packageForAudio.isNullOrEmpty() || packageForAudio == "audio") {
+                Log.d(TAG, "[오디오 상태 변경] ALLOWED 전이 스킵: 유효한 lastMiningApp 없음")
+                return
+            }
             Log.d(TAG, "[오디오 상태 변경] 차단 해제 → 채굴 재개 처리")
-            transitionToState(MiningState.ALLOWED, "audio", triggerOverlay = false)
+            transitionToState(MiningState.ALLOWED, packageForAudio, triggerOverlay = false)
         }
     }
 
@@ -721,17 +945,31 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         screenOffReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == Intent.ACTION_SCREEN_OFF) {
-                    // 화면 OFF 시 차단 앱 오디오 재생 상태 확인 및 저장
-                    // 오디오 상태 변경 콜백이 이미 호출되어 isPausedByAudio 상태가 업데이트되었을 수 있음
-                    Log.d(TAG, "[화면 OFF] 차단 앱 오디오 재생 상태 확인 시작")
-                    val isPausedByAudio = PointMiningService.isPausedByAudio()
-                    Log.d(TAG, "[화면 OFF] 오디오 상태 확인 결과: isPausedByAudio=$isPausedByAudio")
-                    preferenceManager.setAudioBlockedOnScreenOff(isPausedByAudio)
-                    if (isPausedByAudio) {
-                        Log.d(TAG, "[화면 OFF] 차단 앱 오디오 재생 중: 채굴 중지 상태 기록")
-                    } else {
-                        Log.d(TAG, "[화면 OFF] 차단 앱 오디오 재생 중 아님: 상태 기록 (false)")
+                    // 정밀 타이밍: OS 화면 OFF 시점 ~ 오디오 검사 완료까지 ms 측정
+                    val timingStartMs = System.currentTimeMillis()
+                    // Credit 세션 활성 시 항상 세션 패키지 우선(ALLOWED/BLOCKED 무관). 그 다음 BLOCKED 시 currentBlockedPackage, 없으면 null
+                    val candidatePackage = when {
+                        preferenceManager.isCreditSessionActive() -> preferenceManager.getCreditSessionPackage()
+                        currentMiningState == MiningState.BLOCKED -> currentBlockedPackage
+                        else -> null
                     }
+                    val firstCheck = TimeCreditBackgroundService.computeAudioBlockedOnScreenOff(candidatePackage)
+                    val elapsedMs = System.currentTimeMillis() - timingStartMs
+                    Log.d(TAG, "[화면 OFF] 1차 오디오 검사 소요: ${elapsedMs}ms, audioBlocked=$firstCheck")
+                    // 이중 검사: 200ms 후 재검사하여 OS 미디어 세션 정리 후에도 결과 반영 (audioBlocked = 1차 OR 2차)
+                    mainHandler.postDelayed({
+                        val secondCheck = TimeCreditBackgroundService.computeAudioBlockedOnScreenOff(candidatePackage)
+                        val audioBlocked = firstCheck || secondCheck
+                        if (secondCheck && !firstCheck) {
+                            Log.d(TAG, "[화면 OFF] 200ms 재검사: audioBlocked=true로 보정")
+                        }
+                        preferenceManager.setAudioBlockedOnScreenOff(audioBlocked)
+                        if (audioBlocked) {
+                            Log.d(TAG, "[화면 OFF] 차단 앱 오디오 재생 중: 채굴 중지 상태 기록")
+                        } else {
+                            Log.d(TAG, "[화면 OFF] 차단 앱 오디오 재생 아님: 상태 기록 (false)")
+                        }
+                    }, 200L)
 
                     // Case 1: 협상 중(오버레이 뜸)에 화면 끔 -> 도주 감지
                     if (currentOverlay != null) {
@@ -753,14 +991,14 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
 
                         // [핵심] 서비스를 통해 홈으로 보내고 오버레이 정리 (shouldGoHome = true)
                         hideOverlay(shouldGoHome = true)
-                        PointMiningService.resumeMining()
+                        TimeCreditBackgroundService.resumeMining()
                     }
                     // Case 2: 오버레이 없이 차단 상태 -> 화면 OFF 시 홈 이동 제거 (화면 깜빡임 방지)
                     // 화면이 꺼진 상태에서는 사용자가 앱을 볼 수 없으므로 홈 이동 불필요
                     // 화면 ON 시 차단 앱이 보이면 자연스럽게 오버레이가 표시됨
-                    else if (PointMiningService.isMiningPaused() && currentMiningState == MiningState.BLOCKED) {
+                    else if (TimeCreditBackgroundService.isMiningPaused() && currentMiningState == MiningState.BLOCKED) {
                         Log.d(TAG, "차단 상태(오버레이 없음)에서 화면 OFF: 홈 이동 스킵 (화면 깜빡임 방지)")
-                    } else if (PointMiningService.isMiningPaused() && currentMiningState == MiningState.ALLOWED) {
+                    } else if (TimeCreditBackgroundService.isMiningPaused() && currentMiningState == MiningState.ALLOWED) {
                         Log.d(TAG, "차단 상태(오버레이 없음)이지만 이미 ALLOWED 상태(홈 화면): 홈 이동 스킵")
                     }
                 }
@@ -780,6 +1018,241 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                 Log.d(TAG, "Screen OFF Receiver Unregistered")
             } catch (e: Exception) {
                 Log.e(TAG, "Error unregistering screen off receiver", e)
+            }
+        }
+    }
+
+    // ===== 엄격모드: 설정 페이지 차단 로직 =====
+    
+    /**
+     * 엄격모드 활성 상태를 확인합니다.
+     * 
+     * @return 엄격모드가 활성화되어 있으면 true
+     */
+    private fun isStrictModeActive(): Boolean {
+        return try {
+            StrictModeService.isStrictActive(this)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to check strict mode active state", e)
+            false
+        }
+    }
+
+    /**
+     * 설정 페이지를 검사하고 차단합니다.
+     * rootInActiveWindow가 null인 경우 재시도 메커니즘을 포함합니다.
+     */
+    private fun checkAndBlockSettingsPage() {
+        val currentTime = System.currentTimeMillis()
+        
+        // 쿨다운 체크 (너무 빈번한 검사 방지)
+        if (currentTime - lastStrictModeCheckTime < STRICT_MODE_CHECK_COOLDOWN_MS) {
+            return
+        }
+        lastStrictModeCheckTime = currentTime
+        
+        var rootNode = rootInActiveWindow
+        
+        // rootInActiveWindow가 null인 경우 재시도
+        if (rootNode == null) {
+            // 기존 재시도 코루틴 취소
+            strictModeRetryJob?.cancel()
+            strictModeRetryJob = serviceScope.launch {
+                try {
+                    delay(STRICT_MODE_RETRY_DELAY_MS)
+                    rootNode = rootInActiveWindow
+                    if (rootNode != null) {
+                        try {
+                            if (containsBlockedContent(rootNode)) {
+                                Log.d(TAG, "엄격모드: 차단된 콘텐츠 감지 (재시도 후), 뒤로 가기 실행")
+                                performGlobalAction(GLOBAL_ACTION_BACK)
+                                showStrictModeToast()
+                            }
+                        } finally {
+                            // rootNode 반환 (메모리 누수 방지)
+                            rootNode?.recycle()
+                        }
+                    } else {
+                        Log.w(TAG, "엄격모드: rootInActiveWindow가 null (UI 로딩 중일 수 있음)")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "엄격모드 재시도 중 예외 발생", e)
+                }
+            }
+            return
+        }
+        
+        // rootNode가 null이 아닌 경우 즉시 검사
+        try {
+            if (containsBlockedContent(rootNode)) {
+                Log.d(TAG, "엄격모드: 차단된 콘텐츠 감지, 뒤로 가기 실행")
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                showStrictModeToast()
+            }
+        } finally {
+            // rootNode 반환 (메모리 누수 방지)
+            rootNode.recycle()
+        }
+    }
+
+    /**
+     * 노드에서 차단할 콘텐츠가 있는지 확인합니다.
+     * 최적화된 단일 순회 알고리즘을 사용합니다:
+     * - 트리를 한 번만 순회하면서 앱 이름, 차단 키워드, 토글 스위치를 동시에 검색
+     * 
+     * @param rootNode AccessibilityNodeInfo 루트 노드
+     * @return 차단할 콘텐츠가 있으면 true
+     */
+    private fun containsBlockedContent(rootNode: AccessibilityNodeInfo?): Boolean {
+        if (rootNode == null) {
+            return false
+        }
+        
+        try {
+            // 단일 순회로 모든 조건을 동시에 검색 (성능 최적화)
+            val searchResult = searchBlockedContentInTree(rootNode)
+            
+            if (!searchResult.hasAppName) {
+                // 앱 이름이 없으면 차단 불필요
+                return false
+            }
+            
+            // 앱 이름이 있고, 차단 키워드 또는 토글 스위치가 있으면 차단
+            return searchResult.hasBlockedKeyword || searchResult.hasToggleSwitch
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking blocked content", e)
+            return false
+        }
+    }
+    
+    /**
+     * 검색 결과 데이터 클래스
+     */
+    private data class BlockedContentSearchResult(
+        val hasAppName: Boolean = false,
+        val hasBlockedKeyword: Boolean = false,
+        val hasToggleSwitch: Boolean = false
+    )
+    
+    /**
+     * 전체 트리를 단일 순회로 검색하여 앱 이름, 차단 키워드, 토글 스위치를 동시에 찾습니다.
+     * 성능 최적화: 3회 순회 → 1회 순회
+     *
+     * @param node AccessibilityNodeInfo 노드
+     * @param depth 현재 탐색 깊이 (재귀용, 기본 0). MAX_SEARCH_DEPTH 도달 시 탐색 중단.
+     * @return 검색 결과
+     */
+    private fun searchBlockedContentInTree(node: AccessibilityNodeInfo?, depth: Int = 0): BlockedContentSearchResult {
+        if (node == null) {
+            return BlockedContentSearchResult()
+        }
+
+        // [보완+정교화] Max Depth 안전장치: StackOverflow 사전 방어
+        if (depth >= MAX_SEARCH_DEPTH) {
+            Log.w(TAG, "searchBlockedContentInTree: 최대 탐색 깊이($MAX_SEARCH_DEPTH) 도달, 탐색 중단")
+            return BlockedContentSearchResult()
+        }
+        
+        var result = BlockedContentSearchResult()
+        
+        try {
+            val text = node.text?.toString() ?: ""
+            val contentDescription = node.contentDescription?.toString() ?: ""
+            val allText = "$text $contentDescription"
+            val className = node.className?.toString() ?: ""
+            
+            // 앱 이름 확인
+            if (!result.hasAppName && (
+                allText.contains(APP_NAME_KR, ignoreCase = true) ||
+                allText.contains(APP_NAME_EN, ignoreCase = true)
+            )) {
+                result = result.copy(hasAppName = true)
+            }
+            
+            // 차단 키워드 확인 (앱 이름이 있을 때만 의미 있음)
+            if (!result.hasBlockedKeyword) {
+                for (keyword in BLOCKED_KEYWORDS) {
+                    if (allText.contains(keyword, ignoreCase = true)) {
+                        result = result.copy(hasBlockedKeyword = true)
+                        Log.d(TAG, "엄격모드: 차단 키워드 발견 - $keyword")
+                        break
+                    }
+                }
+            }
+            
+            // 토글 스위치 확인 (앱 이름이 있을 때만 의미 있음)
+            if (!result.hasToggleSwitch && (
+                className.contains("Switch", ignoreCase = true) ||
+                className.contains("Toggle", ignoreCase = true) ||
+                className.contains("SwitchCompat", ignoreCase = true)
+            )) {
+                result = result.copy(hasToggleSwitch = true)
+                Log.d(TAG, "엄격모드: 토글 스위치 발견 - $className")
+            }
+            
+            // 모든 조건을 만족하면 조기 종료 (성능 최적화)
+            if (result.hasAppName && (result.hasBlockedKeyword || result.hasToggleSwitch)) {
+                // 자식 노드는 검색하지 않고 반환
+                return result
+            }
+            
+            // 자식 노드 재귀 검색
+            for (i in 0 until node.childCount) {
+                val childNode = node.getChild(i) ?: continue
+                try {
+                    val childResult = searchBlockedContentInTree(childNode, depth + 1)
+                    // 결과 병합
+                    result = BlockedContentSearchResult(
+                        hasAppName = result.hasAppName || childResult.hasAppName,
+                        hasBlockedKeyword = result.hasBlockedKeyword || childResult.hasBlockedKeyword,
+                        hasToggleSwitch = result.hasToggleSwitch || childResult.hasToggleSwitch
+                    )
+
+                    // 모든 조건을 만족하면 조기 종료
+                    if (result.hasAppName && (result.hasBlockedKeyword || result.hasToggleSwitch)) {
+                        return result
+                    }
+                } finally {
+                    // [수정+정교화] 안전 recycle: Throwable 포착으로 Error(StackOverflowError 등)까지 방어
+                    try {
+                        childNode.recycle()
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "childNode.recycle() 실패 (이미 해제된 노드이거나 Error 발생)", t)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error searching blocked content in tree", e)
+        }
+        
+        return result
+    }
+
+    /**
+     * 엄격모드 차단 시 토스트 메시지를 표시합니다.
+     * 중복 표시 방지 메커니즘 포함.
+     */
+    private fun showStrictModeToast() {
+        // 중복 표시 방지
+        if (isStrictModeToastShowing) {
+            return
+        }
+        
+        isStrictModeToastShowing = true
+        serviceScope.launch(Dispatchers.Main) {
+            try {
+                Toast.makeText(
+                    this@AppBlockingService,
+                    getString(R.string.strict_mode_blocked_message),
+                    Toast.LENGTH_SHORT
+                ).show()
+                
+                // 토스트 표시 시간 후 플래그 리셋 (약 2초)
+                delay(2000)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error showing strict mode toast", e)
+            } finally {
+                isStrictModeToastShowing = false
             }
         }
     }

@@ -1,65 +1,126 @@
 package com.faust.presentation.viewmodel
 
 import android.app.Application
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.faust.FaustApplication
 import com.faust.data.database.FaustDatabase
 import com.faust.data.utils.PreferenceManager
+import com.faust.domain.TimeCreditService
 import com.faust.models.BlockedApp
 import com.faust.models.UserTier
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import java.util.Locale
+
+/**
+ * 메인 화면 타이머 UI 상태. Idle=비세션, Running=카운트다운, Syncing=00:00 고정 후 잔액 갱신 대기.
+ * 잔액은 초 단위로 유지 (second-precision).
+ */
+sealed class TimerUiState {
+    data class Idle(val balanceSeconds: Long) : TimerUiState()
+    data class Running(val remainingSeconds: Long) : TimerUiState()
+    data object Syncing : TimerUiState()
+}
 
 /**
  * MainActivity의 데이터 관찰 및 비즈니스 로직을 담당하는 ViewModel입니다.
- * 
+ *
  * 역할:
- * - 포인트 합계 관찰 및 StateFlow로 노출
+ * - TimeCredit 잔액 기반 타이머 상태(TimerUiState) 노출 (메인 카드 표시용)
  * - 차단 앱 목록 관찰 및 StateFlow로 노출
- * - 차단 앱 추가/제거 로직 처리
  */
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val database: FaustDatabase = (application as FaustApplication).database
     private val preferenceManager: PreferenceManager = PreferenceManager(application)
 
-    // 포인트 합계 StateFlow
-    private val _currentPoints = MutableStateFlow<Int>(0)
-    val currentPoints: StateFlow<Int> = _currentPoints.asStateFlow()
+    // TimeCredit 타이머 UI 상태 (메인 카드용)
+    private val _timerUiState = MutableStateFlow<TimerUiState>(TimerUiState.Idle(0))
+    val timerUiState: StateFlow<TimerUiState> = _timerUiState.asStateFlow()
 
     // 차단 앱 목록 StateFlow
     private val _blockedApps = MutableStateFlow<List<BlockedApp>>(emptyList())
     val blockedApps: StateFlow<List<BlockedApp>> = _blockedApps.asStateFlow()
 
     init {
-        observePoints()
         observeBlockedApps()
+        observeTimeCreditTimer()
+    }
+
+    private fun observeTimeCreditTimer() {
+        viewModelScope.launch {
+            preferenceManager.getTimeCreditBalanceFlow()
+                .map { balanceSeconds -> computeTimerState(balanceSeconds) }
+                .distinctUntilChanged()
+                .catch { e -> _timerUiState.value = TimerUiState.Idle(preferenceManager.getTimeCreditBalanceSeconds()) }
+                .collect { state ->
+                    _timerUiState.value = state
+                    if (state is TimerUiState.Syncing) {
+                        launchSyncSafeguard()
+                    }
+                }
+        }
+    }
+
+    private fun computeTimerState(balanceSeconds: Long): TimerUiState {
+        val sessionActive = preferenceManager.isCreditSessionActive()
+        if (!sessionActive) return TimerUiState.Idle(balanceSeconds)
+        val startElapsed = TimeCreditService.sessionStartElapsedRealtime
+        val remainingSeconds = getRemainingSecondsForDisplay(balanceSeconds, startElapsed)
+        return when {
+            remainingSeconds > 0L -> TimerUiState.Running(remainingSeconds)
+            balanceSeconds > 0L -> TimerUiState.Running(balanceSeconds)
+            else -> TimerUiState.Syncing
+        }
     }
 
     /**
-     * [핵심 이벤트: 데이터 동기화 이벤트 - getTotalPointsFlow]
-     * 
-     * 역할: 데이터베이스의 포인트 합계가 변경되면 ViewModel의 StateFlow를 자동으로 갱신합니다.
-     * 트리거: 데이터베이스의 포인트 합계가 변경될 때 자동 발생
-     * 처리: PointTransactionDao.getTotalPointsFlow()를 구독하여 포인트 변경 시 StateFlow 업데이트
-     * 
-     * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
+     * 세션 중 남은 초. max(0, balanceSeconds - elapsedSec). Doze 등 주기 오차는 매 호출 시 차이값 재계산으로 보정.
      */
-    private fun observePoints() {
-        viewModelScope.launch {
-            database.pointTransactionDao().getTotalPointsFlow()
-                .catch { e ->
-                    // 에러 발생 시 0으로 설정
-                    _currentPoints.value = 0
-                }
-                .collect { points ->
-                    // 포인트는 항상 0 이상으로 보장
-                    _currentPoints.value = points.coerceAtLeast(0)
-                }
+    fun getRemainingSecondsForDisplay(balanceSeconds: Long, sessionStartElapsed: Long): Long {
+        if (sessionStartElapsed <= 0L) return balanceSeconds.coerceAtLeast(0L)
+        val elapsedSec = (SystemClock.elapsedRealtime() - sessionStartElapsed) / 1000L
+        return (balanceSeconds - elapsedSec).coerceAtLeast(0L)
+    }
+
+    /** 현재 잔액(초)·세션 시작 단조 시간으로 남은 초 계산 (Fragment 1초 틱에서 호출). */
+    fun getRemainingSecondsForDisplay(): Long {
+        val balanceSeconds = preferenceManager.getTimeCreditBalanceSeconds()
+        val startElapsed = TimeCreditService.sessionStartElapsedRealtime
+        return getRemainingSecondsForDisplay(balanceSeconds, startElapsed)
+    }
+
+    private var syncSafeguardJob: kotlinx.coroutines.Job? = null
+
+    private fun launchSyncSafeguard() {
+        syncSafeguardJob?.cancel()
+        syncSafeguardJob = viewModelScope.launch {
+            delay(5000L)
+            if (_timerUiState.value is TimerUiState.Syncing) {
+                TimeCreditService(getApplication()).endCreditSession()
+            }
+            syncSafeguardJob = null
         }
+    }
+
+    /** HH:MM:SS 포맷 (Locale.US로 숫자 일관). */
+    fun formatTimeAsHhMmSs(totalSeconds: Long): String {
+        val s = (totalSeconds % 60).toInt()
+        val m = ((totalSeconds / 60) % 60).toInt()
+        val h = (totalSeconds / 3600).toInt()
+        return String.format(Locale.US, "%02d:%02d:%02d", h, m, s)
+    }
+
+    /** 비세션 시 잔액(초)을 HH:MM:SS 문자열로. */
+    fun formatBalanceAsHhMmSs(balanceSeconds: Long): String {
+        return formatTimeAsHhMmSs(balanceSeconds.coerceAtLeast(0L))
     }
 
     /**
