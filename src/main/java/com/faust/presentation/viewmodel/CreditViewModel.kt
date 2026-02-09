@@ -77,4 +77,16 @@ class CreditViewModel(application: Application) : AndroidViewModel(application) 
         preferenceManager.setTimeCreditUserType(type)
         _userCreditType.value = type
     }
+
+    /**
+     * [테스트 전용] 타임 크레딧(보상 시간)을 1분(60초) 증가시킵니다.
+     * 클릭 시 잔액에 60초를 더하고 즉시 반영·저장합니다.
+     */
+    fun addTestCreditOneMinute() {
+        val current = preferenceManager.getTimeCreditBalanceSeconds()
+        val newBalance = current + 60L
+        preferenceManager.setTimeCreditBalanceSeconds(newBalance)
+        preferenceManager.persistTimeCreditValues()
+        _creditBalance.value = newBalance
+    }
 }

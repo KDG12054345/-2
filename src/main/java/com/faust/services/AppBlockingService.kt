@@ -28,6 +28,7 @@ import com.faust.domain.StrictModeService
 import com.faust.domain.TimeCreditService
 import com.faust.presentation.view.GuiltyNegotiationOverlay
 import com.faust.presentation.view.OverlayDismissCallback
+import com.faust.utils.AppLog
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.debounce
@@ -45,6 +46,21 @@ data class AppLaunchEvent(
     val packageName: String,
     val timestamp: Long = System.currentTimeMillis()
 )
+
+/**
+ * 정책 레이어 결과: 차단 여부·Grace Period·쿨다운·크레딧 판단만 수행한 뒤의 "의도".
+ * 액션 레이어(applyBlockingIntent)에서만 실제 상태 변경·오버레이·세션 호출.
+ */
+sealed class BlockingIntent {
+    /** 오버레이 표시 (유죄 협상) */
+    data object ShowOverlay : BlockingIntent()
+    /** 크레딧 세션 시작 후 차단 해제 (오버레이 없음) */
+    data object StartCreditSession : BlockingIntent()
+    /** 허용 전이 (비차단/홈). apply 시 tryEndCreditSessionOnLeaveBlockedApp 필수 */
+    data object TransitionAllowed : BlockingIntent()
+    /** 차단 전이 but 오버레이 없음 (Grace Period 등) */
+    data object TransitionBlockedNoOverlay : BlockingIntent()
+}
 
 /**
  * [시스템 진입점: 시스템 이벤트 진입점]
@@ -99,7 +115,6 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     private var currentBlockedAppName: String? = null
 
     // 화면 OFF 감지용 BroadcastReceiver
-    private var screenOffReceiver: BroadcastReceiver? = null
 
     /**
      * 오버레이 생명주기 상태 머신 (단일 상태 소스).
@@ -148,6 +163,13 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     private val DELAY_AFTER_OVERLAY_DISMISS_MS = 150L // 오버레이 닫은 후 홈 이동 지연 시간
     private val DELAY_AFTER_PERSONA_AUDIO_STOP_MS = 150L // PersonaEngine 오디오 정지 완료 대기 시간 (오디오 콜백 지연 고려)
     private val HOME_LAUNCHER_DETECTION_TIMEOUT_MS = 500L // 홈 런처 감지 타임아웃 (백업 메커니즘)
+
+    // 철회 직후 동일 패키지 이벤트 억제 (유죄협상 중복 표시 방지)
+    @Volatile
+    private var lastWithdrawnPackage: String? = null
+    @Volatile
+    private var lastWithdrawnTime: Long = 0L
+    private val WITHDRAW_SUPPRESS_MS = 400L // 철회 후 400ms 동안 동일 패키지 Flow 전송 억제
 
     // Window ID 기반 중복 호출 방지 메커니즘
     @Volatile
@@ -264,11 +286,15 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
 
         initializeBlockedAppsCache()
         initializeHomeLauncherPackages()
-        registerScreenOffReceiver()
         // 상태전이 시스템: TimeCreditBackgroundService에 콜백 등록
         TimeCreditBackgroundService.setBlockingServiceCallback(this)
         TimeCreditBackgroundService.setCreditExhaustedCallback { packageName -> onCreditExhausted(packageName) }
         TimeCreditBackgroundService.setScreenOnSettlementDoneCallback { onScreenOnSettlementDone() }
+        TimeCreditBackgroundService.setScreenOffEventCallback(
+            immediate = { onScreenOffEventImmediate() },
+            audioResolved = { audioBlocked -> onScreenOffEventAudioResolved(audioBlocked) }
+        )
+        TimeCreditBackgroundService.setScreenOffAudioCandidateProvider { getScreenOffAudioCandidatePackage() }
         // 서비스 생존 보장: TimeCreditBackgroundService가 없으면 재기동
         if (!TimeCreditBackgroundService.isServiceRunning()) {
             TimeCreditBackgroundService.startService(applicationContext)
@@ -295,7 +321,6 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         serviceScope.cancel()
         blockedAppsCache.clear()
         homeLauncherPackages.clear()
-        unregisterScreenOffReceiver()
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
 
         super.onDestroy()
@@ -409,98 +434,77 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             }
         }
         
-        // ===== 기존 앱 차단 로직 =====
+        // ===== 기존 앱 차단 로직: 전처리만 (shouldEmitAppForegroundEvent) → emit + 최소 상태 갱신 =====
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            val windowId = event.windowId
-            val className = event.className?.toString()
-            
-            // ===== 필터링 1: IGNORED_PACKAGES 체크 (최우선) =====
-            if (packageName != null && packageName in IGNORED_PACKAGES) {
-                Log.d(TAG, "IGNORED_PACKAGES: 무시 (package=$packageName)")
-                return  // Flow로 보내지 않음
-            }
-            
-            // ===== 필터링 1.5: 오버레이 패키지의 FrameLayout 이벤트 필터링 =====
-            // 오버레이가 표시된 후 FrameLayout 이벤트가 Flow로 전송되어 불필요한 체크 발생 방지
-            if (packageName == "com.faust" && className != null && className.contains("FrameLayout")) {
-                Log.d(TAG, "오버레이 FrameLayout 이벤트: 무시 (package=$packageName, className=$className)")
-                return  // Flow로 보내지 않음
-            }
-            
-            // ===== 필터링 2: className 필터링 (Layout/View 제외 - 무한 디바운스 방지 핵심) =====
-            // ⚠️ 중요: Layout/View를 제외하여 노이즈 이벤트를 사전 차단
-            // Layout/View는 매우 빈번하게 발생하여 debounce 타이머를 계속 리셋시킬 수 있음
-            // className이 null인 경우는 보수적으로 허용 (일부 시스템 이벤트 처리)
-            // 홈 런처 패키지는 className 필터링을 우회 (홈 화면 감지 보장)
-            // Credit Session 앱(차단 앱)은 package 일치 시 클래스 무관하게 '사용 중'으로 인정 (FrameLayout/ViewGroup 포함)
-            val isHomeLauncher = packageName != null && packageName in homeLauncherPackages
-            val isCreditSessionPackage = packageName != null &&
-                preferenceManager.isCreditSessionActive() &&
-                packageName == preferenceManager.getCreditSessionPackage()
-            val isValidClass = isHomeLauncher || isCreditSessionPackage || className == null || (
-                className.contains("Activity") ||
-                className.contains("Dialog") ||
-                className.contains("Fragment")
-            )
-            
-            // Layout, ViewGroup, View 등은 제외 (무한 디바운스 방지)
-            // 단, 홈 런처·Credit Session 패키지는 예외로 허용
-            if (!isValidClass) {
-                Log.d(TAG, "Activity/Dialog/Fragment 아님 (Layout/View 제외): 무시 (className=$className, package=$packageName)")
-                return  // Flow로 보내지 않음
-            }
-            
-            // ===== 필터링 3: Window ID 검사 (중복 이벤트 사전 차단) =====
-            // 오버레이가 닫힌 후(IDLE)에는 같은 앱 재실행 허용 (반복 실행 시나리오 대응)
-            // 기존 방어막(Grace Period, Cool-down)이 handleAppLaunch()에서 작동하여 중복 호출 방지
-            if (windowId != -1) {
-                // Window ID가 유효한 경우: 같은 창이면 무시
-                // 단, 오버레이가 닫힌 후(IDLE)에는 같은 앱 재실행 허용
-                if (windowId == lastWindowId && packageName == lastProcessedPackage && isOverlayBlockingEvents()) {
-                    Log.d(TAG, "Window ID 중복: 무시 (windowId=$windowId, package=$packageName, overlayState=$overlayState)")
-                    return  // Flow로 보내지 않음
-                }
-            } else {
-                // Window ID가 -1인 경우: 오버레이 상태 확인
-                if (isOverlayBlockingEvents() && packageName == lastProcessedPackage) {
-                    Log.d(TAG, "Window ID -1 중복: 무시 (package=$packageName, overlayState=$overlayState)")
-                    return  // Flow로 보내지 않음
-                }
-            }
-            
-            // ===== 필터링 4: 오버레이 상태 체크 =====
-            if (isOverlayBlockingEvents()) {
-                Log.d(TAG, "오버레이 활성 상태: 무시 (overlayState=$overlayState)")
-                return  // Flow로 보내지 않음
-            }
-            
-            // ===== 모든 필터링 통과: Flow로 이벤트 전송 =====
-            if (packageName != null) {
-                // latestActivePackage 업데이트 (Flow로 보내기 전)
-                // ⚠️ 중요: 이 값은 "현재 활성 앱"을 추적하며, debounce 후 collectLatest에서
-                // 이 값과 비교하여 사용자가 이미 다른 앱으로 이동했는지 검출함
-                // debounce 지연 중 빠른 앱 전환 시나리오에서 정합성 체크에 사용됨
-                latestActivePackage = packageName
-                
-                // Flow로 이벤트 전송
-                // ⚠️ 중요: onAccessibilityEvent()는 suspend 함수가 아니므로 tryEmit() 사용
-                // emit()은 suspend 함수이므로 코루틴 스코프 내에서만 사용 가능
-                val launchEvent = AppLaunchEvent(
-                    windowId = windowId,
-                    packageName = packageName,
-                    timestamp = System.currentTimeMillis()
-                )
-                
-                // tryEmit()은 즉시 반환되며, 버퍼가 가득 차면 false 반환 (DROP_OLDEST 정책으로 자동 처리)
+            val launchEvent = shouldEmitAppForegroundEvent(event)
+            if (launchEvent != null) {
+                latestActivePackage = launchEvent.packageName
                 if (!appLaunchEvents.tryEmit(launchEvent)) {
-                    Log.w(TAG, "Flow 버퍼 가득 참: 이벤트 유실 (package=$packageName)")
+                    Log.w(TAG, "Flow 버퍼 가득 참: 이벤트 유실 (package=${launchEvent.packageName})")
                 }
-                
-                // lastWindowId 업데이트 (다음 이벤트 검사용)
-                // ⚠️ 주의: lastProcessedPackage는 collectLatest 블록에서 실제 처리 후에만 업데이트
-                lastWindowId = windowId
+                lastWindowId = launchEvent.windowId
             }
         }
+    }
+
+    /**
+     * 전처리: 이벤트가 "앱 포그라운드 변경"으로 유효한지 판단. 비즈니스 규칙(차단 여부, Grace Period 등)은 넣지 않음.
+     * 반환값이 non-null일 때만 Flow로 전송. lastProcessedPackage는 액션 쪽(Flow 처리 후)에서만 갱신.
+     */
+    private fun shouldEmitAppForegroundEvent(event: AccessibilityEvent): AppLaunchEvent? {
+        val packageName = event.packageName?.toString() ?: return null
+        val windowId = event.windowId
+        val className = event.className?.toString()
+
+        if (packageName in IGNORED_PACKAGES) {
+            Log.d(TAG, "IGNORED_PACKAGES: 무시 (package=$packageName)")
+            return null
+        }
+        if (packageName == "com.faust" && className != null && className.contains("FrameLayout")) {
+            Log.d(TAG, "오버레이 FrameLayout 이벤트: 무시 (package=$packageName, className=$className)")
+            return null
+        }
+        val isHomeLauncher = packageName in homeLauncherPackages
+        val isCreditSessionPackage = preferenceManager.isCreditSessionActive() &&
+            packageName == preferenceManager.getCreditSessionPackage()
+        // 차단 앱은 앱 실행 시 반드시 차단 여부 검사(handleAppLaunch → evaluateBlockingIntent)가 호출되도록 className 무시
+        val isBlockedApp = blockedAppsCache.contains(packageName)
+        val isValidClass = isHomeLauncher || isCreditSessionPackage || isBlockedApp || className == null || (
+            className.contains("Activity") ||
+            className.contains("Dialog") ||
+            className.contains("Fragment")
+        )
+        if (!isValidClass) {
+            Log.d(TAG, "Activity/Dialog/Fragment 아님 (Layout/View 제외): 무시 (className=$className, package=$packageName)")
+            return null
+        }
+        if (windowId != -1) {
+            if (windowId == lastWindowId && packageName == lastProcessedPackage && isOverlayBlockingEvents()) {
+                Log.d(TAG, "Window ID 중복: 무시 (windowId=$windowId, package=$packageName, overlayState=$overlayState)")
+                return null
+            }
+        } else {
+            if (isOverlayBlockingEvents() && packageName == lastProcessedPackage) {
+                Log.d(TAG, "Window ID -1 중복: 무시 (package=$packageName, overlayState=$overlayState)")
+                return null
+            }
+        }
+        if (isOverlayBlockingEvents()) {
+            Log.d(TAG, "오버레이 활성 상태: 무시 (overlayState=$overlayState)")
+            return null
+        }
+        if (packageName == lastWithdrawnPackage) {
+            val elapsed = System.currentTimeMillis() - lastWithdrawnTime
+            if (elapsed < WITHDRAW_SUPPRESS_MS) {
+                Log.d(TAG, "철회 직후 억제: 동일 패키지 이벤트 무시 (package=$packageName, 경과=${elapsed}ms)")
+                return null
+            }
+        }
+        return AppLaunchEvent(
+            windowId = windowId,
+            packageName = packageName,
+            timestamp = System.currentTimeMillis()
+        )
     }
 
     fun setAllowedPackage(packageName: String?) {
@@ -508,95 +512,115 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     }
 
     private suspend fun handleAppLaunch(packageName: String) {
-        val currentTime = System.currentTimeMillis()
-
-        // 1. 오버레이 상태 체크: 상태 머신 기반 (최우선 체크)
-        // - currentOverlay != null: 오버레이가 이미 표시 중
-        // - overlayState: 오버레이가 표시 중이거나 생성/제거 중
         if (currentOverlay != null || isOverlayBlockingEvents()) {
             Log.d(TAG, "오버레이 활성 상태: 패키지 변경 무시 ($packageName, currentOverlay=${currentOverlay != null}, overlayState=$overlayState)")
             return
         }
-
-        // 2. 무시할 패키지 체크
         if (packageName in IGNORED_PACKAGES) return
 
-        // 3. 홈 런처 감지: 홈 화면으로 이동한 경우 상태를 ALLOWED로 전이
+        val intent = evaluateBlockingIntent(packageName)
+        if (intent == null) return
+        applyBlockingIntent(packageName, intent)
+    }
+
+    /**
+     * 정책: 차단 여부, Grace Period, 쿨다운, isCreditAvailable()만 사용해 BlockingIntent 반환.
+     * (액션은 applyBlockingIntent에서만 수행.)
+     */
+    private fun evaluateBlockingIntent(packageName: String): BlockingIntent? {
+        val currentTime = System.currentTimeMillis()
+
         if (packageName in homeLauncherPackages) {
-            Log.d(TAG, "홈 런처 감지: 상태를 ALLOWED로 전이 ($packageName)")
-            transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
-            return
+            return BlockingIntent.TransitionAllowed
         }
-
-        // 4. 차단 앱 여부 확인
         val isBlocked = blockedAppsCache.contains(packageName)
-
-        if (isBlocked) {
-            // 5. Grace Period 체크: 강행 버튼을 눌러 페널티를 지불한 앱은 중복 징벌 방지
-            if (packageName == lastAllowedPackage) {
-                Log.d(TAG, "Grace Period 활성: 중복 징벌 방지 - 오버레이 표시 차단 ($packageName)")
-            // Grace Period가 활성화된 경우에도 채굴은 중단해야 함 (상태 전이는 수행)
-            // 하지만 오버레이는 표시하지 않음
-            transitionToState(MiningState.BLOCKED, packageName, triggerOverlay = false)
-            return
+        if (!isBlocked) {
+            return BlockingIntent.TransitionAllowed
+        }
+        if (packageName == lastAllowedPackage) {
+            return BlockingIntent.TransitionBlockedNoOverlay
+        }
+        try {
+            if (timeCreditService.isCreditAvailable()) {
+                return BlockingIntent.StartCreditSession
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking time credit for $packageName", e)
+        }
+        if (packageName == lastHomeNavigationPackage &&
+            (currentTime - lastHomeNavigationTime) < COOLDOWN_DURATION_MS) {
+            Log.d(TAG, "Cool-down 활성: 오버레이 표시 차단 ($packageName)")
+            return null
+        }
+        return BlockingIntent.ShowOverlay
+    }
 
-            // 5.5. TimeCredit 체크: 크레딧이 있으면 Credit Session 시작하여 차단 해제
-            try {
-                if (timeCreditService.isCreditAvailable()) {
+    /**
+     * 액션: transitionToState, showOverlay, startCreditSession 등 실제 상태 변경만 수행.
+     * TransitionAllowed 또는 차단 앱 이탈 시 반드시 tryEndCreditSessionOnLeaveBlockedApp 호출.
+     */
+    private fun applyBlockingIntent(packageName: String, intent: BlockingIntent) {
+        when (intent) {
+            BlockingIntent.TransitionAllowed -> {
+                Log.i(TAG, "${AppLog.BLOCKING} home/non-blocked → state ALLOWED ($packageName)")
+                lastWithdrawnPackage = null
+                transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
+                tryEndCreditSessionOnLeaveBlockedApp(packageName)
+            }
+            BlockingIntent.TransitionBlockedNoOverlay -> {
+                Log.d(TAG, "Grace Period 활성: 중복 징벌 방지 - 오버레이 표시 차단 ($packageName)")
+                transitionToState(MiningState.BLOCKED, packageName, triggerOverlay = false)
+            }
+            BlockingIntent.StartCreditSession -> {
+                try {
+                    // 이미 활성 세션이면 스킵
+                    if (preferenceManager.isCreditSessionActive()) {
+                        val currentBalance = preferenceManager.getTimeCreditBalanceSeconds()
+                        val sessionPkg = preferenceManager.getCreditSessionPackage()
+                        if (sessionPkg == packageName) {
+                            Log.d(TAG, "${AppLog.BLOCKING} session already active → skip ($packageName, balance: ${currentBalance}s)")
+                            transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
+                            return
+                        }
+                    }
+                    
                     val sessionResult = timeCreditService.startCreditSession(packageName)
                     if (sessionResult is TimeCreditService.UseResult.Success) {
-                        Log.d(TAG, "TimeCredit 사용: Credit Session 시작 ($packageName, 잔액: ${sessionResult.remainingBalanceSeconds}초)")
+                        Log.i(TAG, "${AppLog.BLOCKING} time credit used → credit session started ($packageName, balance: ${sessionResult.remainingBalanceSeconds}s)")
+                        TimeCreditBackgroundService.stopBackgroundAudioDeductionJob()
                         TimeCreditBackgroundService.onCreditSessionStarted()
                         transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
-                        return
-                    }
-                }
-                // 크레딧이 없으면 계속 진행하여 유죄협상 오버레이 표시
-                Log.d(TAG, "TimeCredit 없음: 유죄협상 실행 ($packageName)")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error checking time credit for $packageName", e)
-                // 에러 발생 시 계속 진행 (오버레이 표시)
-            }
-            
-            // 6. 쿨다운 체크: 같은 앱이 최근에 홈으로 이동했고 쿨다운 시간 내면 오버레이 표시 차단
-            if (packageName == lastHomeNavigationPackage && 
-                (currentTime - lastHomeNavigationTime) < COOLDOWN_DURATION_MS) {
-                val elapsedTime = currentTime - lastHomeNavigationTime
-                Log.d(TAG, "Cool-down 활성: 오버레이 표시 차단 ($packageName, 경과 시간=${elapsedTime}ms, 쿨다운=${COOLDOWN_DURATION_MS}ms)")
-                return
-            } else if (packageName == lastHomeNavigationPackage) {
-                val elapsedTime = currentTime - lastHomeNavigationTime
-                Log.d(TAG, "Cool-down 만료: 오버레이 표시 허용 ($packageName, 경과 시간=${elapsedTime}ms, 쿨다운=${COOLDOWN_DURATION_MS}ms)")
-            }
-
-            // 7. 중복 호출 방지: Window ID + Throttling이 주 방어선이므로 여기서는 보조 체크만
-            // (Window ID 검사와 Throttling으로 대부분 차단되지만, 추가 안전장치로 유지)
-            // 주의: 이 로직은 Window ID 검사와 Throttling 이후에 실행되므로 거의 실행되지 않음
-
-            // 8. 상태전이 시스템: ALLOWED → BLOCKED 전이
-            transitionToState(MiningState.BLOCKED, packageName, triggerOverlay = true)
-        } else {
-            // 9. 상태전이 시스템: BLOCKED → ALLOWED 전이
-            // 허용 앱은 Window ID + Throttling으로 충분히 필터링됨
-            transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
-
-            // Credit Session: 차단 앱 이탈 시 잔액 있으면 휴면(Dormant) 강제, 없으면 종료.
-            // 최종 차감 → 세션 종료 순서. 잔액이 있으면 즉시 종료하지 않고 반드시 휴면을 거침.
-            if (preferenceManager.isCreditSessionActive()) {
-                val sessionPackage = preferenceManager.getCreditSessionPackage()
-                if (sessionPackage != null && sessionPackage != packageName) {
-                    val balance = preferenceManager.getTimeCreditBalanceSeconds()
-                    if (balance > 0L) {
-                        TimeCreditBackgroundService.requestDormant()
-                        Log.d(TAG, "Credit Session 휴면 진입: 차단 앱($sessionPackage) 이탈, 잔액 ${balance}초 유지")
                     } else {
-                        TimeCreditBackgroundService.performFinalDeduction()
-                        timeCreditService.endCreditSession()
-                        Log.d(TAG, "Credit Session 종료: 차단 앱($sessionPackage) → 허용 앱($packageName)")
+                        transitionToState(MiningState.BLOCKED, packageName, triggerOverlay = true)
                     }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error starting credit session for $packageName", e)
+                    transitionToState(MiningState.BLOCKED, packageName, triggerOverlay = true)
                 }
             }
+            BlockingIntent.ShowOverlay -> {
+                Log.i(TAG, "${AppLog.BLOCKING} no time credit → show guilty negotiation ($packageName)")
+                transitionToState(MiningState.BLOCKED, packageName, triggerOverlay = true)
+            }
+        }
+    }
+
+    /**
+     * 전환 대상(타깃) 앱이 비차단일 때만 Credit Session 정리.
+     * 타깃이 차단 앱이거나 세션 앱이면 아무것도 하지 않음.
+     */
+    private fun tryEndCreditSessionOnLeaveBlockedApp(targetPackageName: String) {
+        if (blockedAppsCache.contains(targetPackageName)) return
+        if (!preferenceManager.isCreditSessionActive()) return
+        if (preferenceManager.getCreditSessionPackage() == targetPackageName) return
+        val balance = preferenceManager.getTimeCreditBalanceSeconds()
+        if (balance > 0L) {
+            TimeCreditBackgroundService.requestDormant(targetPackageName)
+            Log.i(TAG, "${AppLog.BLOCKING} left blocked app → credit session dormant (target=$targetPackageName, balance=${balance}s)")
+        } else {
+            TimeCreditBackgroundService.performFinalDeduction()
+            timeCreditService.endCreditSession()
+            Log.i(TAG, "${AppLog.BLOCKING} left blocked app, balance 0 → credit session ended (target=$targetPackageName)")
         }
     }
 
@@ -640,7 +664,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                     }
                     // [수정] 상태 전이: SHOWING -> ACTIVE (오버레이 표시 중 + PersonaEngine 오디오 재생 중)
                     overlayState = OverlayState.ACTIVE
-                    Log.d(TAG, "오버레이 표시 완료: 상태=ACTIVE")
+                    Log.i(TAG, "${AppLog.BLOCKING} overlay shown → state=ACTIVE ($packageName)")
                 } else {
                     Log.d(TAG, "오버레이 생성 차단 (비동기 체크): overlayState=$overlayState, currentOverlay=${currentOverlay != null}")
                     // 상태 복구
@@ -669,6 +693,13 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         
         // 2. 패키지 정보 백업 (쿨다운 설정용)
         val blockedPackageForCoolDown = currentBlockedPackage
+
+        // 2.5. 철회(applyCooldown=false) 시 동일 패키지 이벤트 억제용 타임스탬프 설정
+        if (shouldGoHome && !applyCooldown && blockedPackageForCoolDown != null) {
+            lastWithdrawnPackage = blockedPackageForCoolDown
+            lastWithdrawnTime = System.currentTimeMillis()
+            Log.d(TAG, "철회 직후 억제 설정: $blockedPackageForCoolDown (${WITHDRAW_SUPPRESS_MS}ms)")
+        }
 
         // 3. 즉시 상태 동기화 및 리셋 (경쟁 조건 방지 핵심)
         // - currentOverlay = null: handleAppLaunch()에서 즉시 새 오버레이 생성 가능하도록
@@ -781,10 +812,10 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         val isStateChanged = previousState != newState
         
         if (isStateChanged) {
-            Log.d(TAG, "상태 전이: $previousState → $newState ($packageName)")
+            Log.i(TAG, "${AppLog.BLOCKING} state $previousState → $newState ($packageName)")
             currentMiningState = newState
         } else {
-            Log.d(TAG, "상태 전이 스킵: $previousState → $newState (변경 없음)")
+            Log.d(TAG, "${AppLog.BLOCKING} state unchanged → $previousState ($packageName), overlay check only")
         }
         
         when (newState) {
@@ -802,9 +833,9 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                     return
                 }
                 
-                Log.d(TAG, "[상태 전이] ALLOWED → resumeMining() 호출")
+                Log.d(TAG, "${AppLog.BLOCKING} ALLOWED → resumeMining() (allowed app: $packageName)")
                 TimeCreditBackgroundService.resumeMining()
-                Log.d(TAG, "Mining Resumed: 허용 앱으로 전환")
+                Log.i(TAG, "${AppLog.BLOCKING} mining resumed → allowed app $packageName")
                 preferenceManager.setLastMiningApp(packageName)
                 lastAllowedPackage = null
                 hideOverlay(shouldGoHome = false)
@@ -812,9 +843,9 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             MiningState.BLOCKED -> {
                 // 상태 변경이 있으면 채굴 중단 처리
                 if (isStateChanged) {
-                    Log.d(TAG, "[상태 전이] BLOCKED → pauseMining() 호출")
+                    Log.d(TAG, "${AppLog.BLOCKING} BLOCKED → pauseMining() ($packageName)")
                     TimeCreditBackgroundService.pauseMining()
-                    Log.d(TAG, "Mining Paused: 차단 앱 감지 ($packageName)")
+                    Log.i(TAG, "${AppLog.BLOCKING} mining paused → blocked app $packageName")
                     preferenceManager.setLastMiningApp(packageName)
                 }
                 
@@ -850,7 +881,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
      * TimeCreditBackgroundService의 Exhaustion Timer 또는 최종 차감 시 호출됨.
      */
     fun onCreditExhausted(packageName: String) {
-        Log.d(TAG, "[Credit 소진] 즉시 차단 오버레이 표시: $packageName")
+        Log.i(TAG, "${AppLog.BLOCKING} credit exhausted → show overlay immediately: $packageName")
         setAllowedPackage(null)
         serviceScope.launch {
             val appName = getAppName(packageName)
@@ -868,13 +899,13 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         if (packageName !in blockedAppsCache) return
         val balance = preferenceManager.getTimeCreditBalanceSeconds()
         if (balance <= 0L) {
-            Log.d(TAG, "[Screen ON 재진입] 잔액 0: Strict Punishment (showGuiltyNegotiationOverlay)")
+            Log.i(TAG, "${AppLog.BLOCKING} screen ON re-entry, balance 0 → strict punishment overlay ($packageName)")
             serviceScope.launch {
                 val appName = currentBlockedAppName ?: getAppName(packageName)
                 showOverlay(packageName, appName)
             }
         } else {
-            Log.d(TAG, "[Screen ON 재진입] 잔액 있음: 오버레이 스킵, startCreditSession + 재개 ($packageName, balance=${balance}s)")
+            Log.i(TAG, "${AppLog.BLOCKING} screen ON re-entry, balance ${balance}s → startCreditSession + resume ($packageName)")
             try {
                 val sessionResult = timeCreditService.startCreditSession(packageName)
                 if (sessionResult is TimeCreditService.UseResult.Success) {
@@ -896,10 +927,9 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     }
 
     /**
-     * [상태전이 시스템] 오디오 상태 변경 처리
-     * TimeCreditBackgroundService에서 오디오 상태 변경 시 호출됨.
+     * [진입점 (4) 액션] 오디오 재생 상태 변경 결과 적용.
+     * "차단 앱 오디오인가?" 판단은 TimeCreditBackgroundService에서만 수행하고, 여기서는 정책 결과(isBlocked)를 transitionToState(BLOCKED/ALLOWED)로만 반영.
      * Credit 세션 중에는 BLOCKED/ALLOWED 전이 모두 무시(플리커 방지·lastMiningApp 무결성).
-     * transitionToState에는 항상 실제 패키지명만 전달하여 setLastMiningApp이 유효한 패키지로 유지되도록 함.
      */
     fun onAudioBlockStateChanged(isBlocked: Boolean) {
         Log.d(TAG, "[오디오 상태 변경] isBlocked=$isBlocked")
@@ -941,84 +971,51 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         }
     }
 
-    private fun registerScreenOffReceiver() {
-        screenOffReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action == Intent.ACTION_SCREEN_OFF) {
-                    // 정밀 타이밍: OS 화면 OFF 시점 ~ 오디오 검사 완료까지 ms 측정
-                    val timingStartMs = System.currentTimeMillis()
-                    // Credit 세션 활성 시 항상 세션 패키지 우선(ALLOWED/BLOCKED 무관). 그 다음 BLOCKED 시 currentBlockedPackage, 없으면 null
-                    val candidatePackage = when {
-                        preferenceManager.isCreditSessionActive() -> preferenceManager.getCreditSessionPackage()
-                        currentMiningState == MiningState.BLOCKED -> currentBlockedPackage
-                        else -> null
-                    }
-                    val firstCheck = TimeCreditBackgroundService.computeAudioBlockedOnScreenOff(candidatePackage)
-                    val elapsedMs = System.currentTimeMillis() - timingStartMs
-                    Log.d(TAG, "[화면 OFF] 1차 오디오 검사 소요: ${elapsedMs}ms, audioBlocked=$firstCheck")
-                    // 이중 검사: 200ms 후 재검사하여 OS 미디어 세션 정리 후에도 결과 반영 (audioBlocked = 1차 OR 2차)
-                    mainHandler.postDelayed({
-                        val secondCheck = TimeCreditBackgroundService.computeAudioBlockedOnScreenOff(candidatePackage)
-                        val audioBlocked = firstCheck || secondCheck
-                        if (secondCheck && !firstCheck) {
-                            Log.d(TAG, "[화면 OFF] 200ms 재검사: audioBlocked=true로 보정")
-                        }
-                        preferenceManager.setAudioBlockedOnScreenOff(audioBlocked)
-                        if (audioBlocked) {
-                            Log.d(TAG, "[화면 OFF] 차단 앱 오디오 재생 중: 채굴 중지 상태 기록")
-                        } else {
-                            Log.d(TAG, "[화면 OFF] 차단 앱 오디오 재생 아님: 상태 기록 (false)")
-                        }
-                    }, 200L)
+    /**
+     * 화면 OFF 시 오디오 검사용 candidate 패키지. TCB가 화면 OFF 수신 시 이 API로 조회.
+     * Credit 세션 활성 시 세션 패키지, BLOCKED 시 currentBlockedPackage, 없으면 null.
+     */
+    fun getScreenOffAudioCandidatePackage(): String? = when {
+        preferenceManager.isCreditSessionActive() -> preferenceManager.getCreditSessionPackage()
+        currentMiningState == MiningState.BLOCKED -> currentBlockedPackage
+        else -> null
+    }
 
-                    // Case 1: 협상 중(오버레이 뜸)에 화면 끔 -> 도주 감지
-                    if (currentOverlay != null) {
-                        Log.d(TAG, "협상 중 도주 감지: 철회 패널티 부과")
-
-                        val targetPackage = currentBlockedPackage
-                        val targetAppName = currentBlockedAppName ?: "Unknown App"
-
-                        // 비동기: 철회 패널티 적용
-                        serviceScope.launch {
-                            if (targetPackage != null) {
-                                try {
-                                    penaltyService.applyQuitPenalty(targetPackage, targetAppName)
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "철회 패널티 적용 실패", e)
-                                }
-                            }
-                        }
-
-                        // [핵심] 서비스를 통해 홈으로 보내고 오버레이 정리 (shouldGoHome = true)
-                        hideOverlay(shouldGoHome = true)
-                        TimeCreditBackgroundService.resumeMining()
-                    }
-                    // Case 2: 오버레이 없이 차단 상태 -> 화면 OFF 시 홈 이동 제거 (화면 깜빡임 방지)
-                    // 화면이 꺼진 상태에서는 사용자가 앱을 볼 수 없으므로 홈 이동 불필요
-                    // 화면 ON 시 차단 앱이 보이면 자연스럽게 오버레이가 표시됨
-                    else if (TimeCreditBackgroundService.isMiningPaused() && currentMiningState == MiningState.BLOCKED) {
-                        Log.d(TAG, "차단 상태(오버레이 없음)에서 화면 OFF: 홈 이동 스킵 (화면 깜빡임 방지)")
-                    } else if (TimeCreditBackgroundService.isMiningPaused() && currentMiningState == MiningState.ALLOWED) {
-                        Log.d(TAG, "차단 상태(오버레이 없음)이지만 이미 ALLOWED 상태(홈 화면): 홈 이동 스킵")
+    /**
+     * 화면 OFF 즉시 콜백 (TCB가 SCREEN_OFF 수신 후 호출). 도주 패널티·오버레이 정리만 수행.
+     * 오디오 상태는 TCB가 200ms 후 저장하고 onScreenOffEventAudioResolved로 알림.
+     */
+    private fun onScreenOffEventImmediate() {
+        if (currentOverlay != null) {
+            Log.d(TAG, "협상 중 도주 감지: 철회 패널티 부과")
+            val targetPackage = currentBlockedPackage
+            val targetAppName = currentBlockedAppName ?: "Unknown App"
+            serviceScope.launch {
+                if (targetPackage != null) {
+                    try {
+                        penaltyService.applyQuitPenalty(targetPackage, targetAppName)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "철회 패널티 적용 실패", e)
                     }
                 }
             }
+            hideOverlay(shouldGoHome = true)
+            TimeCreditBackgroundService.resumeMining()
+        } else if (TimeCreditBackgroundService.isMiningPaused() && currentMiningState == MiningState.BLOCKED) {
+            Log.d(TAG, "차단 상태(오버레이 없음)에서 화면 OFF: 홈 이동 스킵 (화면 깜빡임 방지)")
+        } else if (TimeCreditBackgroundService.isMiningPaused() && currentMiningState == MiningState.ALLOWED) {
+            Log.d(TAG, "차단 상태(오버레이 없음)이지만 이미 ALLOWED 상태(홈 화면): 홈 이동 스킵")
         }
-
-        val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
-        registerReceiver(screenOffReceiver, filter)
-        Log.d(TAG, "Screen OFF Receiver Registered")
     }
 
-    private fun unregisterScreenOffReceiver() {
-        screenOffReceiver?.let {
-            try {
-                unregisterReceiver(it)
-                screenOffReceiver = null
-                Log.d(TAG, "Screen OFF Receiver Unregistered")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error unregistering screen off receiver", e)
-            }
+    /**
+     * 화면 OFF 200ms 후 오디오 확정 콜백. TCB가 preference 저장 후 호출. 로그만 수행.
+     */
+    private fun onScreenOffEventAudioResolved(audioBlocked: Boolean) {
+        if (audioBlocked) {
+            Log.d(TAG, "[화면 OFF] 차단 앱 오디오 재생 중: 채굴 중지 상태 기록")
+        } else {
+            Log.d(TAG, "[화면 OFF] 차단 앱 오디오 재생 아님: 상태 기록 (false)")
         }
     }
 

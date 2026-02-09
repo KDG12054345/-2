@@ -6,6 +6,11 @@
 
 ### 변경 이력
 
+- **[2026-02-08]** 휴면 판단을 lastKnownForegroundPackage로 전환(대안1): (1) PreferenceManager에서 `isCreditSessionDormant`/`setCreditSessionDormant` 제거. (2) TimeCreditBackgroundService: 메모리 전용 `lastKnownForegroundPackage` 도입(미 persist). `requestDormant(targetPackageName)`으로 변경, 이미 휴면(lastKnown != sessionPackage)이면 갱신·알람만 하고 정산 스킵(순서: 판단 후 갱신). `syncState()`에서 usage=0 조건을 `sessionPkg == null || lastKnownForegroundPackage != sessionPkg`로 통일. (3) `setLastKnownForegroundPackage(packageName)` 노출, TimeCreditService.startCreditSession에서 신규·재진입 시 호출. 영향: PreferenceManager, TimeCreditBackgroundService, AppBlockingService, TimeCreditService, arch_events.
+- **[2026-02-08]** 휴면(Dormant) 구간 이중 차감 방지: (1) PreferenceManager에 `isCreditSessionDormant`/`setCreditSessionDormant` 추가; 세션 비활성화 시 자동 해제. (2) TimeCreditBackgroundService: `requestDormantInternal()`에서 이미 휴면이면 syncState 호출 없이 알람만 취소; `syncState("Dormant_Entry")`에서 이미 휴면이면 정산 스킵·lastSync만 갱신, 최초 휴면 시 정산 후 `setCreditSessionDormant(true)`; 일반 `syncState()`에서 휴면이면 usage=0으로 차감 생략(홈/비차단 앱 체류 시간 차감 방지). (3) TimeCreditService.startCreditSession: 신규·재진입 시 `setCreditSessionDormant(false)`. 영향: PreferenceManager, TimeCreditBackgroundService, TimeCreditService, arch_events.
+- **[2026-02-08]** 진입점 축소 리팩터링 (2·3·4단계): (2) AppBlockingService: shouldEmitAppForegroundEvent, evaluateBlockingIntent, applyBlockingIntent; tryEndCreditSessionOnLeaveBlockedApp 필수 호출. (3) 화면 OFF/ON: TimeCreditBackgroundService만 수신, AppBlockingService는 setScreenOffEventCallback(immediate, audioResolved)·getScreenOffAudioCandidatePackage로 콜백만 수신; 처리 순서 1→2→3→4(200ms 오디오 확정) 고정. (4) 오디오: 진입점 4 전처리(Persona 제외)·정책(TCB)·액션(ABS.onAudioBlockStateChanged) 주석.
+- **[2026-02-08]** 진입점 축소 리팩터링 (5단계): 크레딧 차감·소진 경로 일원화. `evaluateCreditAction(balanceAfter, durationSec, creditAtStart)`로 "소진 알림 필요 여부"만 판단; 세션 모니터, syncState→handleZoneTransition, 화면 OFF 1초 잡, 소진 타이머가 모두 이 함수를 거침. `notifyCreditExhausted()`는 ExhaustAndNotify일 때만 호출. handleZoneTransition은 syncStateLock 안에서 ExhaustAndNotify 반환만 하고, syncState가 락 해제 후 notifyCreditExhausted() 호출(데드락 방지). MainActivity 60초 settleCredits·tryRecoverSessionIfKilled 경로는 유지.
+- **[2026-02-08]** 로그 직관화: 도메인 접두어([Lifecycle], [Credit], [Blocking], [UI]) 및 원인→결과 포맷 도입. `AppLog` 상수 및 키 로그 정비. 영향: `utils/AppLog.kt`, `TimeCreditService`, `MainActivity`, `AppBlockingService`, `TimeCreditBackgroundService`. 로그캣 필터 예: 메시지에 `[Credit]` 또는 `[Blocking]` 검색.
 - **[2026-02-07]** 적응형 감시 구조 고도화: (1) 시간 기준 통일: lastSyncTime·사용량·복구·최종정산을 SystemClock.elapsedRealtime() 기준으로 전환(시계 조작/NTP 동기화 버그 차단). PreferenceManager에 getCreditSessionStartElapsedRealtime() 추가. (2) syncState(reason, balanceOverride): 구간 판정을 handleZoneTransition(balance, isDoze)로 분리. (3) 휴면 단일화: startGoldenTimeJob에서 오디오 공백 시 개별 알람 설정 대신 syncState("Dormant_Entry", balanceOverride) 호출. (4) Doze 모드: syncState 진입 시 isDisplayStateInteractive()로 Doze(3/4) 감지 시 필수 정산만 수행, 유예 알림·무거운 로직 생략. 영향: TimeCreditBackgroundService, TimeCreditService, PreferenceManager, arch_events.
 - **[2026-02-07]** Adaptive Monitoring (60s threshold), syncState() 구간 판정, 정밀 감시 전환 알람(ACTION_PRECISION_TRANSITION), 휴면(Dormant) 시 세션 유지(96초 레이스 제거). §D.5 executeForcedMediaTermination 호출 조건: C≤0 판정 우선(오디오 중단으로 세션 종료 전 반드시 잔액 0 검사). 영향: TimeCreditBackgroundService, TimeCreditService, arch_events §4, §D.
 - **[2026-02-07]** Final Enforcement Logic: Dynamic Branching on Screen ON. (1) Background: Credit 0 & Screen OFF → Kill Audio(executeForcedMediaTermination) → Mining 재개 시점 기록(PreferenceManager.lastMiningResumeElapsedRealtime). (2) Foreground Re-Entry: Screen ON 시 동기 정산(calculateAccumulatedAbstention + settleCredits) 후 콜백으로 AppBlockingService.onScreenOnSettlementDone() 호출; BLOCKED + 차단 앱 포그라운드면 balance ≤ 0 → showGuiltyNegotiationOverlay(Strict Punishment), balance > 0 → startCreditSession(packageName) + transitionToState(ALLOWED). (3) Logic Sync: Audio Kill~Screen ON 구간을 절제로 정산하여 잔액을 먼저 갱신한 뒤 재진입 분기 실행. 영향: PreferenceManager, TimeCreditBackgroundService, AppBlockingService, arch_events.md §4 화면 OFF/ON, §D.
@@ -16,9 +21,24 @@
 
 ---
 
+## 주요 진입점 4개 (Entry Points)
+
+시스템 이벤트는 **4가지 진입점**으로만 수신하며, 각 진입점은 **전처리 → 정책 → 액션** 순서로만 처리합니다.
+
+| 진입점 | 설명 | 전처리 | 정책 | 액션 |
+|--------|------|--------|------|------|
+| (1) 앱 포그라운드 변경 | `onAccessibilityEvent` (TYPE_WINDOW_STATE_CHANGED 등) | 디바운스, Window ID 필터, IGNORED_PACKAGES, lastWithdrawnPackage 억제 | 차단 여부, Grace Period, 쿨다운, isCreditAvailable | transitionToState, showOverlay, startCreditSession, tryEndCreditSessionOnLeaveBlockedApp |
+| (2) 화면 OFF | `ACTION_SCREEN_OFF` (단일 수신처로 일원화 목표) | — | 도주 감지, 오디오 상태 후보 패키지 | performFinalDeductionOnScreenOff, 콜백으로 ABS에 도주/오디오 알림 |
+| (3) 화면 ON | `ACTION_SCREEN_ON` | Doze 무시 등 | 재진입 시 잔액 분기 | 정산(calculateAccumulatedAbstention, settleCredits), screenOnSettlementDoneCallback |
+| (4) 오디오 재생 상태 변경 | `onPlaybackConfigChanged` | Persona 제외 (오버레이 표시 시) | 차단 앱 오디오 여부 | transitionToState(BLOCKED/ALLOWED) |
+
+**기존 시퀀스 다이어그램과의 매핑**: §1 앱 차단 플로우 → 진입점 (1). §4 화면 OFF/ON → 진입점 (2)(3). §7 checkBlockedAppAudioFromConfigs → 진입점 (4).
+
+---
+
 ## 데이터 흐름 시퀀스 다이어그램
 
-### 1. 앱 차단 플로우 (Event-driven)
+### 1. 앱 차단 플로우 (Event-driven) — 진입점 (1) 앱 포그라운드 변경
 
 ```mermaid
 sequenceDiagram
@@ -194,7 +214,7 @@ sequenceDiagram
     end
 ```
 
-### 4. 화면 OFF/ON 감지 및 도주 패널티 플로우
+### 4. 화면 OFF/ON 감지 및 도주 패널티 플로우 — 진입점 (2) 화면 OFF, (3) 화면 ON
 
 ```mermaid
 sequenceDiagram
@@ -469,6 +489,9 @@ sequenceDiagram
 - **쿨다운 면제**: 철회 버튼 클릭 시 `applyCooldown=false`로 쿨다운 면제하여 의도적 재실행 허용
   - 쿨다운 변수(`lastHomeNavigationPackage`, `lastHomeNavigationTime`)를 명시적으로 리셋하여 재실행 시 오버레이 표시 보장
   - 스레드 안전성을 위해 `@Volatile` 어노테이션 적용
+- **철회 직후 동일 패키지 억제 (2026-02-07)**: 철회 시 유죄협상이 한 번 더 뜨는 현상 방지
+  - `lastWithdrawnPackage`, `lastWithdrawnTime` 기록 후 400ms(`WITHDRAW_SUPPRESS_MS`) 동안 동일 패키지 이벤트는 Flow로 전송하지 않음
+  - 홈 런처 감지 시 `lastWithdrawnPackage` 클리어하여 재실행 시 유죄협상 정상 표시 보장
 - **상태 변경 기반 오버레이 표시**: `transitionToState()`에서 `isStateChanged=false`인 경우 오버레이 표시하지 않음
   - `hideOverlay()` 직후 같은 상태로 재전이되는 경우 중복 표시 방지
   - `isStateChanged=true && previousState=ALLOWED`인 경우만 오버레이 표시 (실제 상태 전이 발생 시에만)
@@ -599,7 +622,9 @@ sequenceDiagram
 - `TimeCreditBackgroundService`: 절제 분 누적 로직
 - `PreferenceManager`: lastScreenOffElapsedRealtime, 누적 절제 분, Time Credit 잔액
 
-#### 7. checkBlockedAppAudioFromConfigs (오디오 모니터링 - 이벤트 기반)
+#### 7. checkBlockedAppAudioFromConfigs (오디오 모니터링 - 이벤트 기반) — 진입점 (4) 오디오 재생 상태 변경
+
+**진입점 4 흐름**: 전처리(Persona 제외) → 정책(TCB에서 차단 앱 오디오 여부 판단) → 액션(blockingServiceCallback → AppBlockingService.onAudioBlockStateChanged → transitionToState BLOCKED/ALLOWED).
 
 **위치**: [`TimeCreditBackgroundService.checkBlockedAppAudioFromConfigs()`](app/src/main/java/com/faust/services/TimeCreditBackgroundService.kt)
 
@@ -646,7 +671,7 @@ sequenceDiagram
 
 #### 8. ACTION_SCREEN_OFF/ON (화면 OFF/ON 감지)
 
-**위치**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+**위치**: **화면 OFF/ON은 TimeCreditBackgroundService에서만 수신** ([`registerScreenEventReceiver()`](app/src/main/java/com/faust/services/TimeCreditBackgroundService.kt)). AppBlockingService는 `setScreenOffEventCallback(immediate, audioResolved)`로 등록한 콜백으로만 도주·오디오 알림을 받음. **의존성**: TCB가 기동 중일 때만 화면 OFF(도주·오디오 기록·정산)가 처리됨.
 
 **발생 조건**: 
 - `ACTION_SCREEN_OFF`: 사용자가 기기 화면을 끌 때 시스템이 브로드캐스트를 전송합니다.
@@ -657,24 +682,11 @@ sequenceDiagram
 **플래그 변수**:
 - `isPendingHomeNavigation`: 화면이 꺼진 동안 홈 이동이 예약되었는지를 추적하는 Boolean 플래그 (기본값: false)
 
-**ACTION_SCREEN_OFF 처리 로직**:
-- **차단 앱 오디오 재생 상태 기록**: 화면·소리 모두 없으면 앱 사용으로 보지 않음. 화면 OFF 시점에 **오디오만** 재생 중이면 true 저장 (이벤트 시 1회만 검사)
-  - 정밀 타이밍: 수신 시각 ~ 검사 완료까지 ms 로그 (`[화면 OFF] 오디오 검사 소요: Nms`)
-  - `computeAudioBlockedOnScreenOff(candidatePackage)` — BLOCKED 시 `currentBlockedPackage`를 후보로 사용, 스냅샷 또는 `isPausedByAudio()` OR
-  - 1차가 false일 때 50ms 후 1회 재검사(하이브리드 오디오); 재검사에서 true면 보정 저장
-  - `PreferenceManager.setAudioBlockedOnScreenOff(audioBlocked)` 저장
-  - 이 기록은 화면 ON 후 허용 앱으로 전환되어도 채굴을 재개하지 않도록 사용됨
-- Case 1: 협상 중(오버레이 표시 중) 화면 OFF → 도주 감지
-  - `PenaltyService.applyQuitPenalty()` 호출하여 철회 패널티 적용 (비동기)
-  - `hideOverlay(shouldGoHome = false)` 호출하여 오버레이만 닫기 (홈 이동은 즉시 하지 않음)
-  - `isPendingHomeNavigation = true` 설정하여 홈 이동 예약
-  - 채굴은 이미 pause 상태이므로 유지
-- Case 2: 차단 상태(오버레이 없음)에서 화면 OFF → 홈 이동 스킵
-  - 화면이 꺼진 상태에서는 사용자가 앱을 볼 수 없으므로 홈 이동 불필요 (화면 깜빡임 방지)
-  - `TimeCreditBackgroundService.isMiningPaused()`가 true이고 `currentMiningState == MiningState.BLOCKED`인 경우에도 홈 이동 스킵
-  - 이미 `currentMiningState == MiningState.ALLOWED`인 경우(앱 철회 후 홈 이동 완료된 경우) 홈 이동 스킵
-  - 화면 ON 시 차단 앱이 보이면 자연스럽게 오버레이가 표시됨
-  - 채굴은 이미 pause 상태이므로 유지
+**ACTION_SCREEN_OFF 처리 로직** (TCB가 수신 후 즉시 콜백 → ABS, 이어서 TCB 정산·200ms 후 오디오 확정):
+- **차단 앱 오디오 재생 상태 기록**: TCB가 200ms 후 `computeAudioBlockedOnScreenOff(candidatePackage)` 호출 후 `PreferenceManager.setAudioBlockedOnScreenOff(audioBlocked)` 저장. candidatePackage는 ABS `getScreenOffAudioCandidatePackage()`로 조회. 이 기록은 화면 ON 후 허용 앱으로 전환되어도 채굴을 재개하지 않도록 사용됨.
+- **즉시 콜백 (onScreenOffEventImmediate)** — ABS에서 실행:
+  - Case 1: 협상 중(오버레이 표시 중) 화면 OFF → 도주 감지: `PenaltyService.applyQuitPenalty()`, `hideOverlay(shouldGoHome = true)`, `TimeCreditBackgroundService.resumeMining()`
+  - Case 2: 차단 상태(오버레이 없음)에서 화면 OFF → 홈 이동 스킵 (화면 깜빡임 방지). 화면 ON 시 차단 앱이 보이면 자연스럽게 오버레이가 표시됨.
 
 **ACTION_SCREEN_ON 처리 로직** (TimeCreditBackgroundService):
 - 지능형 디스플레이 가드: `Display.getState()`가 STATE_DOZE(3) 또는 STATE_DOZE_SUSPEND(4)이면 이벤트 무시 (가짜 깨어남·START_FOREGROUND 방지)
@@ -988,9 +1000,7 @@ checkBlockedAppAudioFromConfigs()에서 플래그 리셋
   - BLOCKED 전이 시 상태 변경 여부와 관계없이 오버레이가 없고 조건을 만족하면 오버레이 표시 (오디오 종료 후 차단 앱 재실행 시나리오 대응)
 - **오디오 상태 변경 처리**: [`AppBlockingService.onAudioBlockStateChanged()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
 - **콜백 등록**: [`TimeCreditBackgroundService.setBlockingServiceCallback()`](app/src/main/java/com/faust/services/TimeCreditBackgroundService.kt)
-- **화면 OFF 시 오디오 상태 기록**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
-  - `TimeCreditBackgroundService.computeAudioBlockedOnScreenOff()` 호출하여 동기 스냅샷으로 상태 확인
-  - `PreferenceManager.setAudioBlockedOnScreenOff()` 호출하여 상태 저장
+- **화면 OFF 진입점 단일화**: `ACTION_SCREEN_OFF`는 TimeCreditBackgroundService만 수신. 처리 순서: (1) `getScreenOffAudioCandidatePackage()`(ABS)로 후보 패키지 조회 (2) `onScreenOffEventImmediate()` 콜백 호출 → ABS에서 도주 패널티·hideOverlay (3) TCB performFinalDeductionOnScreenOff, persist, syncState 등 (4) 200ms 후 TCB가 `computeAudioBlockedOnScreenOff(candidatePackage)` 후 `PreferenceManager.setAudioBlockedOnScreenOff(audioBlocked)` 저장 및 `onScreenOffEventAudioResolved(audioBlocked)` 콜백 호출.
 - **오디오 종료 시 플래그 리셋**: [`TimeCreditBackgroundService.checkBlockedAppAudioFromConfigs()`](app/src/main/java/com/faust/services/TimeCreditBackgroundService.kt)
 
 ### 관련 컴포넌트

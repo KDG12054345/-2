@@ -59,6 +59,16 @@
                     android:textColor="?android:attr/textColorSecondary"
                     android:layout_marginTop="8dp" />
 
+                <!-- [테스트] 보상 시간 +1분 버튼 -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonTestAddOneMinute"
+                    style="?attr/materialButtonOutlinedStyle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="end"
+                    android:layout_marginTop="12dp"
+                    android:text="[테스트] +1분" />
+
             </LinearLayout>
 
         </com.google.android.material.card.MaterialCardView>

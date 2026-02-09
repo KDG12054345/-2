@@ -247,6 +247,19 @@ com.faust/
 
 ## 서비스 아키텍처
 
+### 핵심 이벤트 진입점 (4개 + 전처리/정책/액션)
+
+시스템 이벤트는 **4가지 진입점**으로만 수신하며, 각각 **전처리 → 정책 → 액션** 순서로 처리한다.
+
+| 진입점 | 전처리 | 정책 | 액션 |
+|--------|--------|------|------|
+| (1) 앱 포그라운드 변경 | 디바운스, Window ID 필터 | 차단 여부, Grace Period, 쿨다운 | transitionToState, 오버레이, Credit Session |
+| (2) 화면 OFF | 단일 수신처 일원화 | 도주·오디오 후보 | TCB 정산, ABS 콜백(도주/오디오) |
+| (3) 화면 ON | Doze 무시 | 재진입 잔액 분기 | 정산, screenOnSettlementDoneCallback |
+| (4) 오디오 재생 상태 변경 | Persona 제외 | 차단 앱 오디오 여부 | transitionToState(BLOCKED/ALLOWED) |
+
+상세 플로우 및 시퀀스는 [docs/arch_events.md](docs/arch_events.md) § 주요 진입점 4개 참조.
+
 ### 서비스 간 관계도
 
 ```
@@ -546,6 +559,11 @@ MainActivity
 
 ## 변경 이력 (Architecture Change Log)
 
+### [2026-02-08] 진입점 축소 리팩터링 (완료)
+- **목표**: 시스템 이벤트를 4개 진입점으로 고정하고, 전처리 → 정책 → 액션 순서로만 처리하도록 코드·문서 정리.
+- **컴포넌트 영향**: AppBlockingService (진입점 1: shouldEmitAppForegroundEvent, evaluateBlockingIntent, applyBlockingIntent; 화면 OFF 리시버 제거, getScreenOffAudioCandidatePackage·onScreenOffEventImmediate·onScreenOffEventAudioResolved), TimeCreditBackgroundService (화면 OFF/ON 단일 수신, setScreenOffEventCallback·setScreenOffAudioCandidateProvider; evaluateCreditAction·CreditAction; handleZoneTransition 반환값으로 락 밖에서 notifyCreditExhausted), docs/arch_events.md, ARCHITECTURE.md.
+- **변경 사항**: (1) 진입점 4개·전처리/정책/액션 문서화. (2) 앱 포그라운드: 전처리 모듈화, 정책(evaluateBlockingIntent)·액션(applyBlockingIntent) 분리. (3) 화면 OFF/ON: TCB만 수신, ABS는 콜백(즉시·200ms 오디오 확정). (4) 오디오: 진입점 4 문서/주석. (5) 크레딧: evaluateCreditAction 일원화, notifyCreditExhausted 단일 경로, syncState 락 해제 후 소진 콜백. (6) 문서 매핑·이력 갱신.
+
 ### [2026-02-07] Final Enforcement Logic: Dynamic Branching on Screen ON
 - **작업**: Credit 0 & Screen OFF 시 오디오 킬 후 채굴 재개 시점 기록, Screen ON 시 동기 정산 후 잔액 기준으로 포그라운드 재진입 분기(오버레이 vs startCreditSession).
 - **컴포넌트 영향**:
@@ -731,6 +749,19 @@ MainActivity
   - 시스템 이벤트 중복은 여전히 차단 (200ms 내 중복 호출 방지)
   - 실수로 다시 실행하는 경우는 쿨다운으로 보호 (자연스러운 홈 이동 시)
   - 기존 로직 보존: Grace Period, Cool-down(자연스러운 홈 이동 시), 중복 방지 메커니즘 모두 유지
+
+### [2026-02-07] 철회 직후 유죄협상 중복 표시 방지 (400ms 동일 패키지 억제)
+- **작업**: 철회 버튼 클릭 후 유죄협상 오버레이가 한 번 더 뜨는 현상 해결
+- **원인**: `hideOverlay()`에서 `lastWindowId`/`lastProcessedPackage` 리셋 후 스테일 이벤트가 Flow로 전달되어 ALLOWED 강제 전이 후 다시 오버레이 표시
+- **컴포넌트 영향**: `AppBlockingService`
+- **변경 사항**:
+  - `lastWithdrawnPackage`, `lastWithdrawnTime` 추가 (철회 시점·패키지 기록, `@Volatile`)
+  - `hideOverlay(shouldGoHome=true, applyCooldown=false)` 호출 시 해당 패키지·타임스탬프 설정
+  - `onAccessibilityEvent()` 필터링 4.5: 동일 패키지이고 경과 < 400ms(`WITHDRAW_SUPPRESS_MS`)면 Flow 전송 억제
+  - 홈 런처 감지 시 `lastWithdrawnPackage = null`로 클리어하여 재실행 시 유죄협상 보장
+- **영향 범위**:
+  - 철회 직후 스테일 이벤트로 인한 유죄협상 중복 표시 방지
+  - 차단 앱 반복 실행(실행→철회→재실행) 시 우회 방지 유지 (400ms 이후·홈 감지 후 정상 표시)
 
 ### [2026-01-XX] Window ID 검사 + 상태 머신 패턴으로 중복 호출 문제 근본 해결
 - **작업**: 시스템 이벤트 중복과 사용자 의도적 재실행을 구분할 수 없는 근본 문제 해결

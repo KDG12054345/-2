@@ -45,10 +45,16 @@ class FaustApplication : Application() {
                     val map = parts.toMap()
                     val balance = map["balance"]
                     val accumulated = map["accumulated"]
+                    val lastSync = map["lastSync"]
                     if (balance != null && accumulated != null) {
                         android.util.Log.w("FaustApplication", "비상 파일에서 Time Credit 복구: balance=$balance, accumulated=$accumulated")
                         preferenceManager.setTimeCreditBalanceSeconds(balance)
                         preferenceManager.setAccumulatedAbstentionSeconds(accumulated)
+                    }
+                    // Phase 3: 비상 덤프 확장 - lastSync 필드도 복구
+                    if (lastSync != null) {
+                        android.util.Log.w("FaustApplication", "비상 파일에서 lastSync 복구: lastSync=$lastSync")
+                        preferenceManager.setTimeCreditLastSyncTime(lastSync)
                     }
                 }
             } catch (e: Exception) {

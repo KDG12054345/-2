@@ -53,6 +53,9 @@ class CreditFragment : Fragment() {
         textMaxCap = view.findViewById(R.id.textMaxCap)
         textAccumulatedAbstention = view.findViewById(R.id.textAccumulatedAbstention)
 
+        view.findViewById<com.google.android.material.button.MaterialButton>(R.id.buttonTestAddOneMinute)
+            .setOnClickListener { viewModel.addTestCreditOneMinute() }
+
         setupToggleGroup()
         observeViewModel()
     }

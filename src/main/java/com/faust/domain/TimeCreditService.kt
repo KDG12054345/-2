@@ -8,6 +8,8 @@ import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import com.faust.data.utils.PreferenceManager
+import com.faust.services.TimeCreditBackgroundService
+import com.faust.utils.AppLog
 import kotlin.math.min
 
 /**
@@ -67,13 +69,13 @@ class TimeCreditService(private val context: Context) {
     fun settleCredits(): SettlementResult {
         try {
             if (preferenceManager.isCreditSessionActive()) {
-                Log.d(TAG, "settleCredits: Credit Session 활성, 정산 스킵")
+                Log.d(TAG, "${AppLog.CREDIT} session active → settleCredits skipped, balance unchanged")
                 return SettlementResult(0L, preferenceManager.getTimeCreditBalanceSeconds())
             }
             val totalSeconds = preferenceManager.getAccumulatedAbstentionSeconds()
 
             if (totalSeconds <= 0L) {
-                Log.d(TAG, "settleCredits: 누적 절제 시간 없음, 정산 스킵")
+                Log.d(TAG, "${AppLog.CREDIT} no accumulated abstention → settleCredits skipped, balance unchanged")
                 return SettlementResult(0L, preferenceManager.getTimeCreditBalanceSeconds())
             }
 
@@ -82,7 +84,7 @@ class TimeCreditService(private val context: Context) {
             val remainderSeconds = totalSeconds % userRatio
 
             if (earnedSeconds <= 0L) {
-                Log.d(TAG, "settleCredits: 절제 시간 ${totalSeconds}초이지만 비율(${userRatio})로 인해 크레딧 0, 나머지 ${remainderSeconds}초 유지")
+                Log.d(TAG, "${AppLog.CREDIT} abstention ${totalSeconds}s, ratio $userRatio → credit 0, remainder ${remainderSeconds}s kept")
                 preferenceManager.setAccumulatedAbstentionSeconds(remainderSeconds)
                 return SettlementResult(0L, preferenceManager.getTimeCreditBalanceSeconds())
             }
@@ -94,10 +96,10 @@ class TimeCreditService(private val context: Context) {
             preferenceManager.setAccumulatedAbstentionSeconds(remainderSeconds)
             preferenceManager.setTimeCreditLastSyncTime(SystemClock.elapsedRealtime())
 
-            Log.d(TAG, "settleCredits: 절제 ${totalSeconds}초 → 크레딧 +${earnedSeconds}초, 나머지 ${remainderSeconds}초 유지 (잔액: ${newBalanceSeconds}초)")
+            Log.d(TAG, "${AppLog.CREDIT} abstention ${totalSeconds}s → credit +${earnedSeconds}s, remainder ${remainderSeconds}s (balance: ${newBalanceSeconds}s)")
             return SettlementResult(earnedSeconds, newBalanceSeconds)
         } catch (e: Exception) {
-            Log.e(TAG, "settleCredits 실패", e)
+            Log.e(TAG, "${AppLog.CREDIT} settleCredits failed → exception", e)
             return SettlementResult(0L, preferenceManager.getTimeCreditBalanceSeconds())
         }
     }
@@ -119,11 +121,12 @@ class TimeCreditService(private val context: Context) {
                 if (oldPackage != null && oldPackage != packageName) {
                     preferenceManager.setCreditSessionPackage(packageName)
                     preferenceManager.setLastMiningApp(packageName) // Credit 세션 앱을 마지막 채굴 앱으로 동기화 (화면 OFF 오디오 감지용)
-                    Log.d(TAG, "Credit Session Package Updated: $oldPackage -> $packageName")
+                    Log.d(TAG, "${AppLog.CREDIT} package switch $oldPackage → $packageName (session already active)")
                 } else if (oldPackage == packageName) {
                     preferenceManager.setLastMiningApp(packageName) // 재진입 시에도 마지막 채굴 앱 동기화
                 }
-                Log.d(TAG, "Credit Session 이미 활성: 재시작 스킵 ($packageName, 잔액: ${currentBalance}초)")
+                TimeCreditBackgroundService.setLastKnownForegroundPackage(packageName) // 휴면 해제
+                Log.d(TAG, "${AppLog.CREDIT} session already active → startCreditSession skipped ($packageName, balance: ${currentBalance}s)")
                 return UseResult.Success(currentBalance)
             }
 
@@ -135,6 +138,7 @@ class TimeCreditService(private val context: Context) {
             val startTime = System.currentTimeMillis()
             val startElapsed = SystemClock.elapsedRealtime()
             preferenceManager.setCreditSessionActive(true)
+            TimeCreditBackgroundService.setLastKnownForegroundPackage(packageName) // 신규 세션: 포그라운드 = 세션 앱
             preferenceManager.setCreditSessionStartTime(startTime)
             preferenceManager.setCreditSessionStartElapsedRealtime(startElapsed)
             preferenceManager.setTimeCreditLastSyncTime(startElapsed)
@@ -148,15 +152,15 @@ class TimeCreditService(private val context: Context) {
             val wasPending = preferenceManager.getAccumulatedAbstentionSeconds()
             if (wasPending > 0L) {
                 preferenceManager.setAccumulatedAbstentionSeconds(0L)
-                Log.d(TAG, "Credit Session 시작: 미정산 절제 시간 무효화 (기존 ${wasPending}초)")
+                Log.d(TAG, "${AppLog.CREDIT} session start → pending abstention invalidated (was ${wasPending}s)")
             }
 
             // Adaptive Monitoring: Grace Period 알림은 syncState()에서 위험 구간 첫 진입 시 1회 발송.
 
-            Log.d(TAG, "Credit Session 시작: $packageName (잔액: ${currentBalanceSeconds}초)")
+            Log.d(TAG, "${AppLog.CREDIT} session started → $packageName (balance: ${currentBalanceSeconds}s)")
             return UseResult.Success(currentBalanceSeconds)
         } catch (e: Exception) {
-            Log.e(TAG, "startCreditSession 실패", e)
+            Log.e(TAG, "${AppLog.CREDIT} startCreditSession failed → exception", e)
             return UseResult.Failure("세션 시작 실패: ${e.message}")
         }
     }
@@ -173,6 +177,8 @@ class TimeCreditService(private val context: Context) {
             preferenceManager.setCreditSessionActive(false)
             sessionStartElapsedRealtime = 0L
             preferenceManager.setCreditSessionPackage(null) // Ghost data prevention: clear so termination log/analytics use last session package only
+            // Phase 1: 상태 영속화 - 세션 종료 시 lastKnownForegroundPackage 초기화
+            preferenceManager.setLastKnownForegroundPackage(null)
             preferenceManager.setCreditAtSessionStartSeconds(0L)
             preferenceManager.setLastKnownAliveSessionTime(0L)
             // State reset immediately after settlement to prevent Ghost Sessions carrying over to next launch.
@@ -181,9 +187,9 @@ class TimeCreditService(private val context: Context) {
             cancelGracePeriodNotifications()
 
             val remainingBalanceSeconds = preferenceManager.getTimeCreditBalanceSeconds()
-            Log.d(TAG, "Credit Session 종료 (잔액: ${remainingBalanceSeconds}초)")
+            Log.d(TAG, "${AppLog.CREDIT} session ended → balance: ${remainingBalanceSeconds}s")
         } catch (e: Exception) {
-            Log.e(TAG, "endCreditSession 실패", e)
+            Log.e(TAG, "${AppLog.CREDIT} endCreditSession failed → exception", e)
         }
     }
 
@@ -212,7 +218,7 @@ class TimeCreditService(private val context: Context) {
         val actualDeduct = min(penaltySeconds, balanceSeconds)
         val newBalanceSeconds = (balanceSeconds - actualDeduct).coerceAtLeast(0L)
         preferenceManager.setTimeCreditBalanceSeconds(newBalanceSeconds)
-        Log.d(TAG, "applyPenaltyMinutes: ${minutes}분(${actualDeduct}초) 차감 (잔액: ${balanceSeconds} → ${newBalanceSeconds}초)")
+        Log.d(TAG, "${AppLog.CREDIT} penalty ${minutes}min (${actualDeduct}s) → balance ${balanceSeconds}s → ${newBalanceSeconds}s")
         return newBalanceSeconds
     }
 
@@ -291,9 +297,9 @@ class TimeCreditService(private val context: Context) {
             } else {
                 alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
             }
-            Log.d(TAG, "Grace Period 알림 스케줄링: requestCode=$requestCode, action=$action")
+            Log.d(TAG, "${AppLog.CREDIT} grace period notification scheduled → requestCode=$requestCode, action=$action")
         } catch (e: Exception) {
-            Log.e(TAG, "Grace Period 알림 스케줄링 실패", e)
+            Log.e(TAG, "${AppLog.CREDIT} grace period schedule failed → exception", e)
         }
     }
 
@@ -305,7 +311,7 @@ class TimeCreditService(private val context: Context) {
 
         cancelAlarm(alarmManager, REQUEST_CODE_5MIN_BEFORE, ACTION_5MIN_BEFORE)
         cancelAlarm(alarmManager, REQUEST_CODE_1MIN_BEFORE, ACTION_1MIN_BEFORE)
-        Log.d(TAG, "Grace Period 알림 취소 완료")
+        Log.d(TAG, "${AppLog.CREDIT} session end → grace period notifications cancelled")
     }
 
     private fun cancelAlarm(alarmManager: AlarmManager, requestCode: Int, action: String) {

@@ -34,6 +34,7 @@ import com.faust.domain.DailyResetService
 import com.faust.domain.TimeCreditService
 import com.faust.domain.WeeklyResetService
 import com.faust.models.BlockedApp
+import com.faust.utils.AppLog
 import com.faust.presentation.view.AppSelectionDialog
 import com.faust.presentation.view.BlockedAppAdapter
 import com.faust.presentation.view.PersonaSelectionDialog
@@ -449,6 +450,7 @@ class MainActivity : AppCompatActivity() {
     
     override fun onResume() {
         super.onResume()
+        Log.i(TAG, "${AppLog.LIFECYCLE} user returned to app → foreground, running permission/settlement checks")
 
         // 권한 재확인 및 버튼 활성화 상태 업데이트
         updateServiceButtonState()
@@ -489,6 +491,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
+    override fun onPause() {
+        super.onPause()
+        Log.i(TAG, "${AppLog.LIFECYCLE} activity leaving foreground (user left or dialog) → background")
+    }
     
     /**
      * 앱이 포그라운드일 때 Time Credit 정산을 실행합니다.
@@ -499,7 +506,7 @@ class MainActivity : AppCompatActivity() {
             val timeCreditService = TimeCreditService(this)
             val result = timeCreditService.settleCredits()
             if (result.earnedSeconds > 0L) {
-                Log.d(TAG, "TimeCredit 정산: +${result.earnedSeconds}초 (잔액: ${result.newBalanceSeconds}초)")
+                Log.i(TAG, "${AppLog.CREDIT} foreground settlement → earned +${result.earnedSeconds}s (balance: ${result.newBalanceSeconds}s)")
                 val earnedText = if (result.earnedSeconds >= 60) "${result.earnedSeconds / 60}분" else "${result.earnedSeconds}초"
                 Toast.makeText(
                     this,
@@ -508,7 +515,7 @@ class MainActivity : AppCompatActivity() {
                 ).show()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "TimeCredit 정산 실패", e)
+            Log.e(TAG, "${AppLog.CREDIT} foreground settlement failed → exception", e)
         }
     }
 

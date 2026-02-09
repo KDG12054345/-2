@@ -7,6 +7,7 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.faust.models.UserCreditType
 import com.faust.models.UserTier
+import com.faust.utils.AppLog
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.emitAll
@@ -67,6 +68,9 @@ class PreferenceManager(private val context: Context) {
         private const val KEY_LAST_KNOWN_ALIVE_SESSION_TIME = "last_known_alive_session_time"
         private const val KEY_GOLDEN_TIME_ACTIVE = "golden_time_active"
         private const val KEY_LAST_KNOWN_BALANCE_AT_ALIVE = "last_known_balance_at_alive"
+        private const val KEY_LAST_KNOWN_FOREGROUND_PACKAGE = "last_known_foreground_package"
+        private const val KEY_METRICS_IDEMPOTENCY_SKIP_COUNT = "metrics_idempotency_skip_count"
+        private const val KEY_METRICS_PHYSICAL_LIMIT_GUARD_COUNT = "metrics_physical_limit_guard_count"
         // Cool-down 메커니즘
         private const val KEY_TIME_CREDIT_COOLDOWN_START_TIME = "time_credit_cooldown_start_time"
         private const val KEY_TIME_CREDIT_COOLDOWN_DURATION_MINUTES = "time_credit_cooldown_duration_minutes"
@@ -604,6 +608,66 @@ class PreferenceManager(private val context: Context) {
         try { prefs.edit().putBoolean(KEY_PERSIST_DIRTY, false).apply() } catch (_: Exception) { }
     }
 
+    /**
+     * Phase 3: 원자적 업데이트 - 잔액과 lastSyncTime을 하나의 트랜잭션으로 저장.
+     * 
+     * @param balanceSeconds 저장할 잔액(초)
+     * @param lastSyncTimeElapsedRealtime 저장할 마지막 정산 시점 (elapsedRealtime 기준)
+     * @param synchronous true인 경우 commit() 사용 (동기 저장), false인 경우 apply() 사용 (비동기 저장)
+     */
+    fun persistBalanceAndLastSyncTime(balanceSeconds: Long, lastSyncTimeElapsedRealtime: Long, synchronous: Boolean = false) {
+        synchronized(Companion.timeCreditCacheLock) {
+            val balance = balanceSeconds.coerceAtLeast(0L)
+            try {
+                if (synchronous) {
+                    val startMs = System.currentTimeMillis()
+                    var success = prefs.edit()
+                        .putLong(KEY_TIME_CREDIT_BALANCE_SECONDS, balance)
+                        .putLong(KEY_TIME_CREDIT_LAST_SYNC_TIME, lastSyncTimeElapsedRealtime)
+                        .commit()
+                    var elapsed = System.currentTimeMillis() - startMs
+                    if (!success) {
+                        Log.w(TAG, "${AppLog.CONSISTENCY} persistBalanceAndLastSyncTime commit() 1차 실패 (${elapsed}ms), 재시도...")
+                        success = prefs.edit()
+                            .putLong(KEY_TIME_CREDIT_BALANCE_SECONDS, balance)
+                            .putLong(KEY_TIME_CREDIT_LAST_SYNC_TIME, lastSyncTimeElapsedRealtime)
+                            .commit()
+                        elapsed = System.currentTimeMillis() - startMs
+                    }
+                    if (!success) {
+                        Log.e(TAG, "${AppLog.CONSISTENCY} persistBalanceAndLastSyncTime commit() 최종 실패! 복구 플래그 설정 (balance=$balance, lastSync=$lastSyncTimeElapsedRealtime)")
+                        try {
+                            prefs.edit().putBoolean(KEY_PERSIST_DIRTY, true).apply()
+                        } catch (_: Throwable) {
+                            try {
+                                val dumpFile = java.io.File(context.filesDir, "tc_emergency_dump.txt")
+                                dumpFile.writeText("balance=$balance,lastSync=$lastSyncTimeElapsedRealtime,ts=${System.currentTimeMillis()}\nEOF")
+                                Log.e(TAG, "${AppLog.CONSISTENCY} 비상 파일 덤프 완료: ${dumpFile.absolutePath}")
+                            } catch (_: Throwable) { }
+                        }
+                    } else if (elapsed > 50) {
+                        Log.w(TAG, "${AppLog.CONSISTENCY} persistBalanceAndLastSyncTime commit() 소요 시간 경고: ${elapsed}ms")
+                    }
+                    // 성공 시 캐시 갱신
+                    if (success) {
+                        Companion.cachedBalanceSeconds = balance
+                    } else {
+                        // commit() 실패 시에도 캐시는 갱신하지 않음 (데이터 정합성 보호)
+                    }
+                } else {
+                    prefs.edit()
+                        .putLong(KEY_TIME_CREDIT_BALANCE_SECONDS, balance)
+                        .putLong(KEY_TIME_CREDIT_LAST_SYNC_TIME, lastSyncTimeElapsedRealtime)
+                        .apply()
+                    // 비동기 저장이므로 캐시만 갱신
+                    Companion.cachedBalanceSeconds = balance
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "${AppLog.CONSISTENCY} Failed to persist balance and last sync time", e)
+            }
+        }
+    }
+
     /** TimeCredit 잔액(초) Flow. 초기값 + setTimeCreditBalanceSeconds 호출 시마다 갱신. */
     fun getTimeCreditBalanceFlow(): Flow<Long> = Companion.getTimeCreditBalanceFlow(prefs) { getTimeCreditBalanceSeconds() }
 
@@ -749,6 +813,29 @@ class PreferenceManager(private val context: Context) {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set credit session package", e)
+        }
+    }
+
+    /** 마지막으로 알려진 포그라운드 패키지명을 조회합니다. Phase 1: 상태 영속화. */
+    fun getLastKnownForegroundPackage(): String? {
+        return try {
+            prefs.getString(KEY_LAST_KNOWN_FOREGROUND_PACKAGE, null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get last known foreground package", e)
+            null
+        }
+    }
+
+    /** 마지막으로 알려진 포그라운드 패키지명을 저장합니다. Phase 1: 상태 영속화. */
+    fun setLastKnownForegroundPackage(packageName: String?) {
+        try {
+            if (packageName != null) {
+                prefs.edit().putString(KEY_LAST_KNOWN_FOREGROUND_PACKAGE, packageName).apply()
+            } else {
+                prefs.edit().remove(KEY_LAST_KNOWN_FOREGROUND_PACKAGE).apply()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set last known foreground package", e)
         }
     }
 
@@ -1025,6 +1112,44 @@ class PreferenceManager(private val context: Context) {
             prefs.edit().clear().apply()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to clear preferences", e)
+        }
+    }
+
+    /**
+     * Phase 3: 운영 지표 수집 - 메트릭 저장
+     */
+    fun saveMetrics(idempotencySkipCount: Long, physicalLimitGuardCount: Long) {
+        try {
+            prefs.edit()
+                .putLong(KEY_METRICS_IDEMPOTENCY_SKIP_COUNT, idempotencySkipCount)
+                .putLong(KEY_METRICS_PHYSICAL_LIMIT_GUARD_COUNT, physicalLimitGuardCount)
+                .apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save metrics", e)
+        }
+    }
+
+    /**
+     * Phase 3: 운영 지표 수집 - 멱등성 스킵 횟수 조회
+     */
+    fun getMetricsIdempotencySkipCount(): Long {
+        return try {
+            prefs.getLong(KEY_METRICS_IDEMPOTENCY_SKIP_COUNT, 0L)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get metrics idempotency skip count", e)
+            0L
+        }
+    }
+
+    /**
+     * Phase 3: 운영 지표 수집 - 세이프 가드 발동 횟수 조회
+     */
+    fun getMetricsPhysicalLimitGuardCount(): Long {
+        return try {
+            prefs.getLong(KEY_METRICS_PHYSICAL_LIMIT_GUARD_COUNT, 0L)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get metrics physical limit guard count", e)
+            0L
         }
     }
 }
